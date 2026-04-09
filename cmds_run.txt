@@ -1,0 +1,30 @@
+
+## Running the stage 2 from TAMM using ckpt from CIA (stage1)
+
+torchrun --nproc_per_node=1 main_original.py 
+
+--config configs/Pre-Training/tamm_cia_stage2_PointBERT.yaml 
+
+--trial_name tamm_cia_noLVIS_PointBERT_bs50_natalino_retest \
+
+--resume exp/tamm_cia_noLVIS_PointBERT_bs50_natalino\@20251223-141603/ckpt/epoch_24.pt 
+
+
+## Search best CIA acc 
+torchrun --nproc_per_node=1 main_original.py \
+--config configs/Pre-Training/tamm_cia_stage1.yaml \
+--trial_name searching_best_CIA_ShapeNet
+
+
+# -------------------------------------------------------------------------------
+# Code testing TAMM paper
+## We are rely on checkpoint provided by the authors.
+
+### Stage 1
+
+
+### Stage 2
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=1 test.py --config configs/Pre-Training/pointbert.yaml --resume tamm_models_ckpt/tamm_pointbert_ensemble.pt
+
+# trying zs inference
+torchrun --nproc_per_node=1 test.py --config configs/Inferences/mrl_tamm_PoinBert.yaml --resume exp/MRL_TAMM_PointBERT_ShapeNet_bs32_to32@20260216-212533/ckpt/epoch_198.pt

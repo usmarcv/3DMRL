@@ -1,0 +1,105 @@
+project_name: TAMM_MRL
+clip_embed_dim: 1280
+clip_embed_version: OpenCLIP
+
+#Trainer
+trainer: 'trainer_clip_adapter'
+
+#Seeds
+fix_seed: True
+seed: 42
+
+device: 'cuda:0'
+num_workers: 10
+batch_size: 256
+num_points: 10000
+
+model:
+  name: CLIPAdapter
+  ratio: 0.2
+  c_in: ${clip_embed_dim}
+  out_channel: ${clip_embed_dim}
+
+
+mrl:
+  use_mrl: True
+  dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+
+
+training:
+  scheduler: 'cosine'
+  max_epoch: 200
+  lr: 0.0005
+  warmup_epoch: 10
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  log_freq: 20
+  save_freq: 1
+  lambda_img_contras: 1
+  lambda_text_contras: 1
+  use_image_proj: False
+  use_text_proj: False
+  logit_scale_init: 14.28
+  use_mask: False
+  mask_threshold: 0.1
+
+
+#Path to our data splits
+#Ensembled (no-LVIS): data/meta_data/split/train_no_lvis.json
+#Ensembled: data/meta_data/split/train_all.json
+#ShapeNet: data/meta_data/split/ablation/train_shapenet_only.json
+
+dataset:
+  name: Four
+  num_imgs: 1
+  num_texts: 1
+  train_split: data/meta_data/split/train_all.json
+  train_partial: -1
+  use_openshape_feature: True
+  num_points: ${num_points}
+  num_workers: 12
+  train_batch_size: ${batch_size}
+  use_knn_negative_sample: True
+  negative_sample_num: 1
+  knn_path: data/meta_data/point_feat_knn.npy
+  y_up: True
+  normalize: True
+  random_z_rotate: True
+  use_color: True
+  rgb_random_drop_prob: 0.5
+  augment: True
+  text_source: [text, caption, retrieval_text]
+  use_text_filtering: True
+  use_prompt_engineering: True
+  gpt4_filtering_path: data/meta_data/gpt4_filtering.json
+
+
+modelnet40:
+  test_split: data/meta_data/modelnet40/test_split.json
+  test_pc: data/meta_data/modelnet40/test_pc.npy
+  num_points: ${num_points}
+  num_workers: 10
+  test_batch_size: ${batch_size}
+  clip_feat_path: data/meta_data/modelnet40/cat_name_pt_feat.npy
+  y_up: True
+
+objaverse_lvis:
+  split: data/meta_data/split/lvis.json
+  clip_feat_path: data/meta_data/lvis_cat_name_pt_feat.npy
+  num_points: ${num_points}
+  num_workers: 6
+  batch_size: ${batch_size}
+  y_up: True
+  normalize: True
+  use_color: True
+
+scanobjectnn:
+  data_path: data/meta_data/scanobjectnn/xyz_label.npy
+  num_points: ${num_points}
+  num_workers: 10
+  test_batch_size: ${batch_size}
+  clip_feat_path: data/meta_data/scanobjectnn/cat_name_pt_feat.npy
+  y_up: True
+
+

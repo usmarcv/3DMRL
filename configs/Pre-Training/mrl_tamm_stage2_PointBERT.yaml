@@ -1,0 +1,128 @@
+project_name: MRL_3D_CLIP
+clip_embed_dim: 1280
+clip_embed_version: OpenCLIP
+
+trainer: 'trainer_mrl'
+
+batch_size: 50
+num_points: 10000
+num_workers: 16
+
+
+fix_seed: True
+seed: 0
+
+
+# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29502 main.py --config configs/Pre-Training/mrl_tamm_stage2_PointBERT.yaml --trial_name TAMM_MRL_PointBERT_Stage2_ShapeNetOnly
+
+mrl:
+  use_mrl: True
+  use_mrl_log_scale: False
+  # dims: [80, 160, 320, 640, 1280]
+  dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+
+
+model:
+  name: PointBERT
+  scaling: 4
+  use_dense: True
+  in_channel: 6
+  out_channel: 512
+  embedding_channel: 1024
+  voxel_size: 0.02
+
+
+#Our CIA Align with image and text features
+pretrained_clip:
+  name: CLIPAdapter
+  ratio: 0.2
+  c_in: 1280
+  path: exp/CIA_mrl_ShapeNet_lr0001@20260309-155053/ckpt/epoch_172.pt
+
+
+training:
+  use_openclip_optimizer_scheduler: True
+  scheduler: "cosine"
+  max_epoch: 100 # 200
+  test_epoch: 92 # 70
+  lr: 0.00015
+  lr_decay: 30
+  lr_decay_rate: 0.95
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-08
+  warmup_epoch: 10
+  log_freq: 20
+  save_freq: 1
+  lambda_img_contras: 1
+  lambda_text_contras: 1
+  use_mrl_image_proj: False
+  use_mrl_text_proj: False
+  logit_scale_init: 14.28
+  use_mask: False
+  mask_threshold: 0.1
+  use_image_proj: False
+  use_text_proj: False
+
+#Path to our data splits
+#Ensembled (no-LVIS): data/meta_data/split/train_no_lvis.json
+#Ensembled: data/meta_data/split/train_all.json
+#ShapeNet: data/meta_data/split/ablation/train_shapenet_only.json
+
+dataset:
+  name: Four
+  num_imgs: 1
+  num_texts: 1
+  train_split: data/meta_data/split/ablation/train_shapenet_only.json
+  train_partial: -1
+  use_openshape_feature: True
+  num_points: ${num_points}
+  num_workers: ${num_workers}
+  train_batch_size: ${batch_size}
+  use_knn_negative_sample: True
+  negative_sample_num: 1
+  knn_path: data/meta_data/point_feat_knn.npy
+  y_up: True
+  normalize: True
+  random_z_rotate: True
+  use_color: True
+  rgb_random_drop_prob: 0.5
+  augment: True
+  text_source: [ text, caption, retrieval_text ]
+  use_text_filtering: True
+  use_prompt_engineering: True
+  gpt4_filtering_path: data/meta_data/gpt4_filtering.json
+
+
+modelnet40:
+  test_split: data/meta_data/modelnet40/test_split.json
+  test_pc: data/meta_data/modelnet40/test_pc.npy
+  num_points: ${num_points}
+  num_workers: 6
+  test_batch_size: ${batch_size}
+  clip_feat_path: data/meta_data/modelnet40/cat_name_pt_feat.npy
+  y_up: True
+  normalize: True
+  use_color: True
+
+
+objaverse_lvis:
+  split: data/meta_data/split/lvis.json
+  clip_feat_path: data/meta_data/lvis_cat_name_pt_feat.npy
+  num_points: ${num_points}
+  num_workers: ${num_workers}
+  batch_size: ${batch_size}
+  y_up: True
+  normalize: True
+  use_color: True
+
+
+scanobjectnn:
+  data_path: data/meta_data/scanobjectnn/xyz_label.npy
+  num_points: ${num_points}
+  num_workers: 6
+  test_batch_size: ${batch_size}
+  clip_feat_path: data/meta_data/scanobjectnn/cat_name_pt_feat.npy
+  y_up: True
+  normalize: True
+  use_color: True

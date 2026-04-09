@@ -1,0 +1,11 @@
+./exp
+exp
+./MinkowskiEngine
+./data
+data
+./dataset
+./tamm_models_ckpt
+tamm_models_ckpt
+assets/
+dataset/
+MinkowskiEngine/
