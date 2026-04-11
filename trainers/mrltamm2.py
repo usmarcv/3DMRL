@@ -82,35 +82,94 @@ class TAMM_Trainer(object):
             "step": self.step,
         }, os.path.join(self.config.ckpt_dir, f'{name}.pt'))
 
-    def calc_contrastive_loss(self, feat1, feat2, logit_scale, mask=None):
-        # 1. Normaliza as features locais
-        feat1 = F.normalize(feat1, dim=-1)
-        feat2 = F.normalize(feat2, dim=-1)
-        
-        # 2. Junta as features de TODAS as 4 GPUs (mantendo o gradiente de feat1)
-        # Se o batch local for 32, feat1_all e feat2_all terão tamanho 128
-        feat1_all = gather_features(feat1)
-        feat2_all = gather_features(feat2)
+    def _get_module(self, module):
+        return module.module if hasattr(module, "module") else module
 
-        # 3. Calcula a similaridade Global vs Global (128 x 128)
-        sim = feat1_all @ feat2_all.T
-        sim = sim * logit_scale
+    def _get_shape_embedding(self, feat_pc, dim=None):
+        """
+        feat_pc : (B, 512) — saída do PointBERT
+        dim     : granularidade desejada. None = head completa (maior dim).
+        Retorna (B, 1280) normalizado.
+        """
+        heads    = self._get_module(self.mrl_heads)
+        mrl_dims = heads.mrl_dims
 
-        labels = torch.arange(sim.shape[0], device=sim.device)
-        
-        # Lógica da máscara adaptada para o batch global (se estiver usando)
-        if mask is not None:
-            # Se usar máscara, certifique-se de que a máscara original
-            # também foi gerada baseada no batch global ou faça o gather dela aqui.
-            pass # (Recomendo testar sem a máscara primeiro com DDP)
-            
-        loss_i = F.cross_entropy(sim, labels)
-        loss_t = F.cross_entropy(sim.T, labels)
-        loss = (loss_i + loss_t) / 2
-        
-        acc = (sim.argmax(dim=1) == labels).float().mean()
-        
-        return loss, acc
+        if dim is None:
+            head = heads.heads[-1]
+            z    = feat_pc[:, :mrl_dims[-1]]
+        else:
+            idx  = mrl_dims.index(dim)
+            head = heads.heads[idx]
+            z    = feat_pc[:, :dim]
+
+        return F.normalize(head(z), dim=-1)  # (B, 1280)
+
+    def _prepare_clip_text(self, loader):
+        """Extrai, opcionalmente projeta e normaliza clip_cat_feat do dataset."""
+        feat = torch.from_numpy(loader.dataset.clip_cat_feat).to(self.config.device)
+        if self.config.training.use_text_proj:
+            feat = self.text_proj(feat)
+        feat = F.normalize(feat, dim=-1)
+        loader.dataset._clip_text_feat_normalized = feat
+        return feat
+
+    # ──────────────────────────────────────────────────────────────────────
+    # MRL Loss
+    # ──────────────────────────────────────────────────────────────────────
+
+    def mrl_loss(self, feat_pc, feat_clip, logit_scale=1, mask=None, lambdas=None):
+        """
+        feat_pc   : (B, 512)  — saída do PointBERT (ou do adapter, se two_branch)
+        feat_clip : (B, 1280) — embedding CLIP frozen (text ou image)
+
+        Para cada dim:
+            s = normalize(head_dim(feat_pc[:, :dim]))  (B, 1280)
+            t = normalize(feat_clip)                   (B, 1280)
+            loss += λ_dim * contrastive_loss(s, t)
+        """
+        heads    = self._get_module(self.mrl_heads)
+        mrl_dims = heads.mrl_dims
+
+        if lambdas is None:
+            lambdas = [1.0] * len(mrl_dims)
+
+        projected = heads(feat_pc)                    # lista de (B, 1280)
+        t         = F.normalize(feat_clip, dim=-1)    # (B, 1280)
+
+        total_loss   = 0.0
+        total_acc    = 0.0
+        loss_per_dim = {}
+        acc_per_dim  = {}
+
+        for i, (s, dim) in enumerate(zip(projected, mrl_dims)):
+            if self.config.ngpu > 1:
+                all_s  = torch.cat(torch.distributed.nn.all_gather(s), dim=0)
+                all_t  = torch.cat(torch.distributed.nn.all_gather(t), dim=0)
+                logits = logit_scale * (all_s @ all_t.T)
+            else:
+                logits = logit_scale * (s @ t.T)
+
+            if mask is not None:
+                if mask.dtype == torch.bool:
+                    logits = logits.masked_fill(~mask, -1e9)
+                else:
+                    logits = logits + (1.0 - mask.float()) * -1e9
+
+            labels   = torch.arange(logits.shape[0], device=self.config.device)
+            loss_dim = (
+                F.cross_entropy(logits, labels) +
+                F.cross_entropy(logits.T, labels)
+            ) / 2.0
+            acc_dim  = (logits.argmax(dim=1) == labels).float().mean()
+
+            total_loss += lambdas[i] * loss_dim
+            total_acc  += acc_dim
+
+            loss_per_dim[dim] = loss_dim.detach().item()
+            acc_per_dim[dim]  = acc_dim.detach().item()
+
+    return total_loss, total_acc / len(mrl_dims), loss_per_dim, acc_per_dim
+
 
 
     # def train_one_epoch(self):  

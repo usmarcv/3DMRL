@@ -130,7 +130,7 @@ class Alignment_MRL(object):
             # total_loss += weights[i] * loss_dim_slice
             total_loss += relative_importance * loss_dim_slice
             # total_acc += acc_dim_slice
-            total_acc += relative_importance * acc_dim_slice            
+            total_acc =* acc_dim_slice            
 
         return total_loss, total_acc, loss_per_dim, acc_per_dim
 

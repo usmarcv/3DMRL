@@ -5,7 +5,65 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.distributed.nn
+from torch import nn
+import torch.nn.functional as F
 
+class GatherLayer(torch.autograd.Function):
+    """
+    Junta os tensores de todas as GPUs mantendo o fluxo de gradientes (backward pass).
+    """
+    @staticmethod
+    def forward(ctx, x):
+        output = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
+        dist.all_gather(output, x)
+        return tuple(output)
+
+    @staticmethod
+    def backward(ctx, *grads):
+        all_gradients = torch.stack(grads)
+        dist.all_reduce(all_gradients)
+        return all_gradients[dist.get_rank()]
+
+def gather_features(features):
+    if dist.is_available() and dist.is_initialized():
+        gathered_features = GatherLayer.apply(features)
+        return torch.cat(gathered_features, dim=0)
+    return features
+
+
+class MRLProjectionHeads(nn.Module):
+    """
+    Uma Linear independente por granularidade MRL.
+
+    Para cada dim em mrl_dims:
+        head_dim : Linear(dim, clip_dim, bias=False)
+        entrada  : z[:, :dim]  — prefixo do embedding 3D (PointBERT, 1280 dims)
+        saída    : ℝ^clip_dim  — projetado no espaço do professor CLIP (1280 dims)
+    """
+
+    def __init__(self, mrl_dims, clip_dim=1280):
+        super().__init__()
+        self.mrl_dims = mrl_dims
+        self.clip_dim = clip_dim
+        self.heads = nn.ModuleList([
+            nn.Linear(dim, clip_dim, bias=False)
+            for dim in mrl_dims
+        ])
+        self._init_weights()
+
+    def _init_weights(self):
+        for head in self.heads:
+            nn.init.orthogonal_(head.weight)
+
+    def forward(self, z):
+        """
+        z : (B, D) — embedding do PointBERT (D = 1280)
+        Retorna lista de (B, clip_dim), cada um L2-normalizado.
+        """
+        return [
+            F.normalize(head(z[:, :dim]), dim=-1)
+            for head, dim in zip(self.heads, self.mrl_dims)
+        ]
 
 
 def merge_results_dist(part_logits, part_labels):
@@ -55,42 +113,3 @@ def merge_two_branch_results_dist(part_image_logits, part_text_logits, part_labe
 
     return logits_image, logits_text, labels_all
 
-
-# def merge_two_branch_results_dist(tmpdir, part_image_logits, part_text_logits, part_labels):
-#     rank = dist.get_rank()
-#     world_size = dist.get_world_size()
-
-#     os.makedirs(tmpdir, exist_ok=True)
-#     pickle.dump(torch.cat(part_image_logits).cpu().numpy(),
-#                 open(os.path.join(tmpdir, 'result_part_image_{}.pkl'.format(rank)), 'wb'))
-#     pickle.dump(torch.cat(part_text_logits).cpu().numpy(),
-#                 open(os.path.join(tmpdir, 'result_part_text_{}.pkl'.format(rank)), 'wb'))
-#     pickle.dump(torch.cat(part_labels).cpu().numpy(),
-#                 open(os.path.join(tmpdir, 'label_part_{}.pkl'.format(rank)), 'wb'))
-    
-#     dist.barrier()
-#     if rank == 0:
-#         part_image_list = []
-#         part_text_list = []
-#         part_label_list = []
-
-#         for i in range(world_size):
-#             part_image_file = os.path.join(tmpdir, 'result_part_image_{}.pkl'.format(i))
-#             part_text_file = os.path.join(tmpdir, 'result_part_text_{}.pkl'.format(i))
-#             part_label = os.path.join(tmpdir, 'label_part_{}.pkl'.format(i))
-
-#             part_image_list.append(pickle.load(open(part_image_file, 'rb')))
-#             part_text_list.append(pickle.load(open(part_text_file, 'rb')))
-#             part_label_list.append(pickle.load(open(part_label, 'rb')))
-
-#         part_image_list = np.concatenate(part_image_list, axis=0)
-#         part_text_list = np.concatenate(part_text_list, axis=0)
-#         part_label_list = np.concatenate(part_label_list, axis=0)
-
-#         logits_image = torch.from_numpy(part_image_list)
-#         logits_text = torch.from_numpy(part_text_list)
-#         labels_all = torch.from_numpy(part_label_list)
-
-#         return logits_image, logits_text, labels_all
-#     else:
-#         return None, None, None

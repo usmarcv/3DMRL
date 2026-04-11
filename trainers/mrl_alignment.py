@@ -15,9 +15,6 @@ from tqdm import tqdm
 from trainers.trainer_utils import merge_results_dist
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MRLProjectionHeads — igual ao mrl_trainer.py
-# ──────────────────────────────────────────────────────────────────────────────
 
 class MRLProjectionHeads(nn.Module):
     """
