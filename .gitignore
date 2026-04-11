@@ -9,7 +9,10 @@ tamm_models_ckpt
 assets/
 dataset/
 MinkowskiEngine/
-
+logs_treinamento/
+./models/
+./__pycache__/
+*.pyc
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
