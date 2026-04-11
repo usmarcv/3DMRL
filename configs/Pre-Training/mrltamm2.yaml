@@ -2,12 +2,22 @@ project_name: MRL_3D_CLIP
 clip_embed_dim: 1280
 clip_embed_version: OpenCLIP
 
-trainer: 'mrl_alignment'
+trainer: '3dmrl_trainer'
 
 batch_size: 50
 num_points: 10000
 num_workers: 10
+
+
 nesting_list: [10, 20, 40, 80, 160, 320, 640, 1280]
+
+
+mrl:
+  use_mrl: True
+  dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  mrl_heads: [10, 20, 40, 80, 160, 320, 640, 1280]
+
+
 
 fix_seed: True
 seed: 0
@@ -24,12 +34,12 @@ model:
   voxel_size: 0.02
 
 
-use_pretrained: True
-pretrained_adapters:
-  name: CLIPAdapter
-  ratio: 0.2
-  c_in: 1280
-  path: exp/08abril_ensembled_ratio_02_adapters_lr_1e-3@20260408-104818/ckpt/epoch_180.pt
+# use_pretrained: True
+# pretrained_adapters:
+#   name: CLIPAdapter
+#   ratio: 0.2
+#   c_in: 1280
+#   path: exp/08abril_ensembled_ratio_02_adapters_lr_1e-3@20260408-104818/ckpt/epoch_180.pt
   # path: exp/05abril_AdaptersMRL_Ensembled_bs50_ratio_0.2_n1@20260405-175840/ckpt/epoch_190.pt
   # path: exp/03abril_AdaptersMRL_ShapeNet_bs50_ratio_0.6_n1@20260403-123609/ckpt/epoch_183.pt
   # path: exp/01abril_MRL_Adapters_Ensembled_bs50_ratio_0.2@20260401-100635/ckpt/epoch_190.pt
@@ -43,15 +53,14 @@ training:
   use_openclip_optimizer_scheduler: True
   scheduler: "cosine"
   max_epoch: 200 # 200
-  test_epoch: 20 # 70
-  # lr: 0.0002 #0.0001
+  test_epoch: 25 # 70
   lr: 0.0005
   lr_decay: 30
   lr_decay_rate: 0.95
   beta1: 0.9
   beta2: 0.999
   eps: 1.0e-08
-  warmup_epoch: 2
+  warmup_epoch: 10
   log_freq: 10
   save_freq: 1
   lambda_img_contras: 1
@@ -70,11 +79,31 @@ training:
 #Ensembled: data/meta_data/split/train_all.json
 #ShapeNet: data/meta_data/split/ablation/train_shapenet_only.json
 
+
+# ShapeNet
+# training:
+#   lr: 0.0005
+#   warmup_epoch: 10    # ~2600 steps
+#   max_epoch: 200
+
+# # Ensembled no-LVIS  
+# training:
+#   lr: 0.0005
+#   warmup_epoch: 5     # ~21900 steps — dataset grande já tem gradiente estável mais rápido
+#   max_epoch: 200
+
+# # Objaverse-LVIS
+# training:
+#   lr: 0.0005
+#   warmup_epoch: 10    # ~2300 steps — similar ao ShapeNet
+#   max_epoch: 200
+
+
 dataset:
   name: Four
   num_imgs: 4
   num_texts: 1
-  train_split: data/meta_data/split/train_all.json
+  train_split: data/meta_data/split/ablation/train_shapenet_only.json
   train_partial: -1
   use_openshape_feature: True
   num_points: ${num_points}
