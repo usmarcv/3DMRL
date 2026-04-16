@@ -1,30 +1,17 @@
 import logging
 import os
-
 import numpy as np
 import torch
+import math
 import torch.distributed as dist
 import torch.distributed.nn
 import torch.nn.functional as F
 from numpy import *
 from tqdm import tqdm
-
-from trainers.trainer_utils import merge_two_branch_results_dist
-from trainers.trainer_utils import merge_results_dist
-
-
-# from MRL import MRL_Linear_Layer, Matryoshka_CE_Loss, FixedFeatureLayer
-
-
-# from trainers.mrl_trainer_adapters import MRLProjectionHeads
-
 from torch import nn
-
-import math
+from torch.amp import autocast
 from collections import OrderedDict, defaultdict
-
 from trainers.trainer_utils import merge_results_dist
-
 
 
 class GatherLayer(torch.autograd.Function):
@@ -50,8 +37,6 @@ def gather_features(features):
     return features
 
 
-
-
 class TrainerToMRL(object):
     def __init__(self, rank, config, model, logit_scale, image_proj, text_proj, mrl_heads,
                  optimizer,
@@ -65,9 +50,6 @@ class TrainerToMRL(object):
         self.image_proj = image_proj
         self.text_proj = text_proj
         self.mrl_heads = mrl_heads
-        # self.image_alignment_adapter = image_alignment_adapter
-        # self.text_alignment_adapter = text_alignment_adapter
-        # self.clip_adapter = clip_adapter
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.train_loader = train_loader
@@ -87,62 +69,60 @@ class TrainerToMRL(object):
             self.config.ngpu = dist.get_world_size()
         else:
             self.config.ngpu = 1
-        
-        # self.mrl_dims = self.config.model.get("mrl_dims", None)
-        # self.mrl = MRL_Linear_Layer(nesting_list=self.mrl_dims, num_classes=0).to(self.config.device)
 
+        self.precision = self.config.training.precision
+        if self.precision == "bf16":
+            self.dtype = torch.bfloat16
+        elif self.precision == "fp16":
+            self.dtype = torch.float16
+        else:
+            self.dtype = torch.float32
+
+        use_scaler = (self.precision == "fp16")
+        self.scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
+        
 
     def load_from_checkpoint(self, path):
         checkpoint = torch.load(path, map_location='cpu')
-        self.model.load_state_dict(checkpoint['state_dict'])
+        
+        self._get_module(self.model).load_state_dict(checkpoint['state_dict'])
+        self._get_module(self.logit_scale).load_state_dict(checkpoint['logit_scale'])
+        
+        # Carrega os cabeçalhos MRL
+        if 'mrl_heads' in checkpoint:
+            self._get_module(self.mrl_heads).load_state_dict(checkpoint['mrl_heads'])
+            
+        # Carrega as projeções (se existirem no checkpoint e no config)
+        if self.config.training.use_text_proj and 'text_proj' in checkpoint:
+            self._get_module(self.text_proj).load_state_dict(checkpoint['text_proj'])
+        if self.config.training.use_image_proj and 'image_proj' in checkpoint:
+            self._get_module(self.image_proj).load_state_dict(checkpoint['image_proj'])
 
-        # self.image_alignment_adapter.load_state_dict(checkpoint['image_alignment_adapter'])
-        # self.text_alignment_adapter.load_state_dict(checkpoint['text_alignment_adapter'])
-
-        self.logit_scale.load_state_dict(checkpoint['logit_scale'])  # module.logit_scale = checkpoint['logit_scale']
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         if self.config.training.scheduler == "default":
             self.scheduler.load_state_dict(checkpoint['scheduler'])
+            
         self.epoch = checkpoint['epoch'] + 1
         self.step = checkpoint['step']
 
         logging.info("Loaded checkpoint from {}".format(path))
         logging.info("----Epoch: {0} Step: {1}".format(self.epoch, self.step))
 
+
     def _get_module(self, module):
         return module.module if hasattr(module, "module") else module
-
-
-    def contras_loss(self, feat1, feat2, logit_scale=1, mask=None):
-        if self.config.ngpu > 1:
-            # i=5
-            # if i<4:
-            feat1 = F.normalize(feat1, dim=1) #[B, D]
-            print("feat1", feat1.shape, self.rank)
-            feat2 = F.normalize(feat2, dim=1)
-            print("feat2", feat2.shape, self.rank)
-            all_feat1 = torch.cat(torch.distributed.nn.all_gather(feat1), dim=0)
-            all_feat2 = torch.cat(torch.distributed.nn.all_gather(feat2), dim=0)
-            logits = logit_scale * all_feat1 @ all_feat2.T
-            # print("logit", logits.shape, self.rank)
-        else:
-            logits = logit_scale * F.normalize(feat1, dim=1) @ F.normalize(feat2, dim=1).T
-        if mask is not None:
-            logits = logits * mask
-        labels = torch.arange(logits.shape[0]).to(self.config.device)
-        accuracy = (logits.argmax(dim=1) == labels).float().mean()
-        loss = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
-        return loss, accuracy
-
+        
 
     def mrl_loss(self, feat_pc, feat_clip, logit_scale=1, mask=None, lambdas=None):
 
-        heads    = self._get_module(self.mrl_heads)
-        mrl_dims = heads.mrl_dims
-
+        # Obtém a nova MRL_Projection_Layer
+        heads = self._get_module(self.mrl_heads)
+        nesting_list = heads.nesting_list # Agora usamos o nome padrão
+        
         if lambdas is None:
-            lambdas = [1.0] * len(mrl_dims)
+            lambdas = [1.0] * len(nesting_list)
 
+        # O forward da nova classe já devolve a tupla de embeddings projetados!
         projected = heads(feat_pc)  
 
         t = F.normalize(feat_clip, dim=-1) 
@@ -152,12 +132,15 @@ class TrainerToMRL(object):
         loss_per_dim = {}
         acc_per_dim  = {}
 
-        for i, (s, dim) in enumerate(zip(projected, mrl_dims)):
+        for i, (s, dim) in enumerate(zip(projected, nesting_list)):
+            
+            # Normalizamos o embedding projetado (s) antes da similaridade
+            s = F.normalize(s, dim=-1)
 
             if self.config.ngpu > 1:
-                all_s = torch.cat(torch.distributed.nn.all_gather(s), dim=0)  # (B*G, 1280)
-                all_t = torch.cat(torch.distributed.nn.all_gather(t), dim=0)  # (B*G, 1280)
-                logits = logit_scale * (all_s @ all_t.T)                      # (B*G, B*G)
+                all_s = torch.cat(torch.distributed.nn.all_gather(s), dim=0)  
+                all_t = torch.cat(torch.distributed.nn.all_gather(t), dim=0)  
+                logits = logit_scale * (all_s @ all_t.T)                      
 
                 labels = torch.arange(logits.shape[0], device=self.config.device)
                 loss_dim = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2.0
@@ -178,7 +161,6 @@ class TrainerToMRL(object):
                 ) / 2.0
                 acc_dim  = (logits.argmax(dim=1) == labels).float().mean()
 
-            # ── acumula FORA do if/else, para ambos os casos ──────────────
             total_loss += lambdas[i] * loss_dim  
             total_acc  += acc_dim
 
@@ -187,36 +169,38 @@ class TrainerToMRL(object):
 
         total_loss = total_loss / sum(lambdas)
 
-        return total_loss, total_acc / len(mrl_dims), loss_per_dim, acc_per_dim
+        return total_loss, total_acc / len(nesting_list), loss_per_dim, acc_per_dim
 
 
     def _get_shape_embedding(self, feat_pc, dim=None):
         """
-        Projeção para inferência zero-shot.
-
-        feat_pc : (B, 512) — saída do PointBERT
-        dim     : granularidade desejada. None = usa a head completa (maior dim).
-
-        Retorna embedding (B, 1280) normalizado, pronto para similaridade coseno
-        com embeddings CLIP de texto/imagem.
-
-        Para retrieval eficiente em escala, passe dim menor (ex: dim=64) para
-        shortlisting e dim=None para re-ranking.
+        Projeção para inferência zero-shot com suporte ao modo eficiente.
         """
-        heads    = self._get_module(self.mrl_heads)
-        mrl_dims = heads.mrl_dims
+        heads = self._get_module(self.mrl_heads)
+        nesting_list = heads.nesting_list
 
+        # Se dim não for passado, assume a dimensão máxima (último elemento)
         if dim is None:
-            # Head da maior granularidade — melhor qualidade
-            head = heads.heads[-1]
-            z    = feat_pc[:, :mrl_dims[-1]]
-        else:
-            # Head da granularidade solicitada
-            idx  = mrl_dims.index(dim)
-            head = heads.heads[idx]
-            z    = feat_pc[:, :dim]
+            dim = nesting_list[-1]
 
-        return F.normalize(head(z), dim=-1)  # (B, 1280)
+        # Fatiamos a entrada da Point Cloud na dimensão desejada
+        x_slice = feat_pc[:, :dim]
+
+        if heads.efficient:
+            # Modo eficiente: Fatiar manualmente os pesos da única camada grande
+            weight_slice = heads.proj_0.weight[:, :dim]
+            z = torch.matmul(x_slice, weight_slice.t())
+            
+            if heads.proj_0.bias is not None:
+                z += heads.proj_0.bias
+        else:
+            # Modo padrão: Usar a camada específica dessa dimensão
+            idx = nesting_list.index(dim)
+            head = getattr(heads, f"proj_{idx}")
+            z = head(x_slice)
+
+        # Retorna o embedding normalizado para a busca por cosseno
+        return F.normalize(z, dim=-1)
 
 
     def train_one_epoch(self):
@@ -229,7 +213,6 @@ class TrainerToMRL(object):
         text_contras_acc_list = []
         img_contras_acc_list = []
     
-        #mrl metrics per dimension
         epoch_img_loss_dim = defaultdict(list)
         epoch_img_acc_dim = defaultdict(list)
         epoch_txt_loss_dim = defaultdict(list)
@@ -244,74 +227,80 @@ class TrainerToMRL(object):
             mask2 = np.kron(np.eye(s), np.ones((k, k))).astype(np.bool)
             mask_other = torch.from_numpy(np.logical_or(mask1, 1 - mask2)).bool().to(self.config.device)
 
+        
         for data in tqdm(self.train_loader):            
             self.step += 1
             self.optimizer.zero_grad()
             loss = 0
-            if not self.config.model.get("use_dense", False):
-                pred_feat = self.model(data['xyz'], data['features'], device=self.config.device,
-                                       quantization_size=self.config.model.voxel_size)
-            else:
-                pred_feat = self.model(data['xyz_dense'].to(self.config.device), \
-                                       data['features_dense'].to(self.config.device))
-            
-            logit_scale = self.logit_scale(None)
-            text_feat = torch.vstack(data['text_feat']) # image feature from dataset
-            img_feat = torch.vstack(data['img_feat']) # text feature
 
-            if self.config.training.use_mask:
-                img_text_sim = F.normalize(img_feat, dim=-1) @ F.normalize(text_feat, dim=-1).T
-                mask = torch.diagonal(img_text_sim).reshape(-1, 1) - img_text_sim > self.config.training.mask_threshold
-                mask = torch.logical_or(mask, mask_other).detach()
-            else:
-                mask = None
+            with torch.autocast(device_type=self.config.device, dtype=self.dtype, enabled=(self.dtype != torch.float32)):
 
-            text_feat = torch.vstack(data['text_feat']).to(self.config.device)
-            img_feat = torch.vstack(data['img_feat']).to(self.config.device)
-            idx = data['has_text_idx']
-            
-            if self.config.dataset.num_imgs > 0:       
-                for i in range(self.config.dataset.num_imgs):
-                    single_img_feat = img_feat[:, i * self.config.clip_embed_dim: (i + 1) * self.config.clip_embed_dim].to(self.config.device)
+                if not self.config.model.get("use_dense", False):
+                    pred_feat = self.model(data['xyz'], data['features'], device=self.config.device,
+                                        quantization_size=self.config.model.voxel_size)
+                else:
+                    pred_feat = self.model(data['xyz_dense'], data['features_dense'])
+                
+                logit_scale = self.logit_scale(None)
+                text_feat = torch.vstack(data['text_feat']) # image feature from dataset
+                img_feat = torch.vstack(data['img_feat']) # text feature
 
-                    img_contras_loss, img_contras_acc, \
-                    img_loss_dims, img_acc_dims = \
-                    self.mrl_loss(pred_feat, single_img_feat,
-                                 logit_scale=logit_scale,
-                               mask=mask, lambdas=lambdas)
-                        
-                        
-                    loss += img_contras_loss * self.config.training.lambda_img_contras 
-                    img_contras_acc_list.append(img_contras_acc.item())
+                if self.config.training.use_mask:
+                    img_text_sim = F.normalize(img_feat, dim=-1) @ F.normalize(text_feat, dim=-1).T
+                    mask = torch.diagonal(img_text_sim).reshape(-1, 1) - img_text_sim > self.config.training.mask_threshold
+                    mask = torch.logical_or(mask, mask_other).detach()
+                else:
+                    mask = None
 
-                #calcula as métricas por dimensão
-                for d, val in img_loss_dims.items():
-                    epoch_img_loss_dim[d].append(val)
-                   
-                for d, val in img_acc_dims.items():
-                    epoch_img_acc_dim[d].append(val)
+                text_feat = torch.vstack(data['text_feat']).to(self.config.device)
+                img_feat = torch.vstack(data['img_feat']).to(self.config.device)
+                idx = data['has_text_idx']
+                
+                if self.config.dataset.num_imgs > 0:       
+                    for i in range(self.config.dataset.num_imgs):
+                        single_img_feat = img_feat[:, i * self.config.clip_embed_dim: (i + 1) * self.config.clip_embed_dim].to(self.config.device)
 
+                        img_contras_loss, img_contras_acc, \
+                        img_loss_dims, img_acc_dims = \
+                        self.mrl_loss(pred_feat, single_img_feat,
+                                    logit_scale=logit_scale,
+                                mask=mask, lambdas=lambdas)
+                            
+                            
+                        loss += img_contras_loss * self.config.training.lambda_img_contras 
+                        img_contras_acc_list.append(img_contras_acc.item())
 
-                for i in range(self.config.dataset.num_texts):
-
-                    single_text_feat = text_feat[:, i * self.config.clip_embed_dim: (i + 1) * self.config.clip_embed_dim]
-                    single_text_feat = single_text_feat.to(self.config.device)
-
-                    text_contras_loss, text_contras_acc, txt_loss_dims, txt_acc_dims = self.mrl_loss(pred_feat[idx], single_text_feat,
-                                                logit_scale=logit_scale, mask=mask, lambdas=lambdas)
-                        
-                    loss += text_contras_loss * self.config.training.lambda_text_contras
-                    text_contras_acc_list.append(text_contras_acc.item())
-                    # text_contras_acc_list.append(float(text_contras_acc))
-
-                for d, val in txt_loss_dims.items():
-                    epoch_txt_loss_dim[d].append(val)
-                for d, val in txt_acc_dims.items():
-                    epoch_txt_acc_dim[d].append(val)
+                    #calcula as métricas por dimensão
+                    for d, val in img_loss_dims.items():
+                        epoch_img_loss_dim[d].append(val)
+                    
+                    for d, val in img_acc_dims.items():
+                        epoch_img_acc_dim[d].append(val)
 
 
-            loss.backward()
-            self.optimizer.step()
+                    for i in range(self.config.dataset.num_texts):
+
+                        single_text_feat = text_feat[:, i * self.config.clip_embed_dim: (i + 1) * self.config.clip_embed_dim]
+                        single_text_feat = single_text_feat.to(self.config.device)
+
+                        text_contras_loss, text_contras_acc, txt_loss_dims, txt_acc_dims = self.mrl_loss(pred_feat[idx], single_text_feat,
+                                                    logit_scale=logit_scale, mask=mask, lambdas=lambdas)
+                            
+                        loss += text_contras_loss * self.config.training.lambda_text_contras
+                        text_contras_acc_list.append(text_contras_acc.item())
+                        # text_contras_acc_list.append(float(text_contras_acc))
+
+                    for d, val in txt_loss_dims.items():
+                        epoch_txt_loss_dim[d].append(val)
+                    for d, val in txt_acc_dims.items():
+                        epoch_txt_acc_dim[d].append(val)
+
+
+            # loss.backward()
+            self.scaler.scale(loss).backward()
+            # self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             if self.config.training.scheduler == "cosine" or self.config.training.scheduler == "const":
                 self.scheduler(self.step)
@@ -320,9 +309,9 @@ class TrainerToMRL(object):
 
        
         if self.rank == 0:
-            logging.info('Train avg: image_contrast_acc: {0} text_contrast_acc: {1}' \
-                         .format(np.mean(img_contras_acc_list)  \
-                                 np.mean(text_contras_acc_list) if len(text_contras_acc_list) > 0 else 0))
+            logging.info('Treino Média: Acc Txt: {0:.4f} | Acc Img: {1:.4f}'.format(
+                np.mean(text_contras_acc_list) if len(text_contras_acc_list) > 0 else 0,
+                np.mean(img_contras_acc_list) if len(img_contras_acc_list) > 0 else 0))
             
             # --- Tabela MRL Formatada ---
             header = f"{'Dim':<6} | {'Img Loss':<10} | {'Img Acc':<10} | {'Txt Loss':<10} | {'Txt Acc':<10}"
@@ -346,14 +335,22 @@ class TrainerToMRL(object):
 
 
     def save_model(self, name):
-        torch.save({
-            "state_dict": self.model.state_dict(),
-            "logit_scale": self.logit_scale.state_dict(),  # module.logit_scale,
+        checkpoint = {
+            "state_dict": self._get_module(self.model).state_dict(),
+            "logit_scale": self._get_module(self.logit_scale).state_dict(),
+            "mrl_heads": self._get_module(self.mrl_heads).state_dict(), # <-- ADICIONADO
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict() if self.config.training.scheduler == "default" else None,
             "epoch": self.epoch,
             "step": self.step,
-        }, os.path.join(self.config.ckpt_dir, '{}.pt'.format(name)))
+        }
+        
+        if self.config.training.use_text_proj:
+            checkpoint["text_proj"] = self._get_module(self.text_proj).state_dict()
+        if self.config.training.use_image_proj:
+            checkpoint["image_proj"] = self._get_module(self.image_proj).state_dict()
+
+        torch.save(checkpoint, os.path.join(self.config.ckpt_dir, '{}.pt'.format(name)))
 
 
     def accuracy(self, output, target, topk=(1,)):
@@ -378,294 +375,492 @@ class TrainerToMRL(object):
         for epoch in range(self.epoch, self.config.training.max_epoch):
             self.epoch = epoch
             if self.rank == 0:
+                logging.info("Precision used for training: {}".format(self.precision))
                 logging.info("Epoch: {}".format(self.epoch))
             self.train_one_epoch()
 
             if epoch > self.config.training.test_epoch:
-                self.test_objaverse_lvis()
                 self.test_modelnet40()
+                self.test_objaverse_lvis()
                 self.test_scanobjectnn()
             # if self.rank == 0:
             # self.save_model('latest')
             if self.rank == 0 and self.epoch % self.config.training.save_freq == 0:
                 self.save_model('epoch_{}'.format(self.epoch))
 
-                
+
     def test_modelnet40(self):
         self.model.eval()
         if self.config.training.use_text_proj:
             self.text_proj.eval()
+        if self.config.training.use_image_proj:
+            self.image_proj.eval()
+        self._get_module(self.mrl_heads).eval()
 
-        clip_text_feat = torch.from_numpy(
-            self.modelnet40_loader.dataset.clip_cat_feat
-        ).to(self.config.device)
+        clip_text_feat = torch.from_numpy(self.modelnet40_loader.dataset.clip_cat_feat).to(self.config.device)
         if self.config.training.use_text_proj:
             clip_text_feat = self.text_proj(clip_text_feat)
 
-        logits_all = []
+        heads = self._get_module(self.mrl_heads)
+        nesting_list = heads.nesting_list
+
+        logits_all = {dim: [] for dim in nesting_list}
         labels_all = []
 
         with torch.no_grad():
             for data in tqdm(self.modelnet40_loader):
-                if not self.config.model.get("use_dense", False):
-                    pred_feat = self.model(
-                        data['xyz'], data['features'],
-                        device=self.config.device,
-                        quantization_size=self.config.model.voxel_size
-                    )
-                else:
-                    pred_feat = self.model(
-                        data['xyz_dense'].to(self.config.device),
-                        data['features_dense'].to(self.config.device)
-                    )
+                
+                # =====================================================================
+                # AUTOCAST APENAS NO FORWARD DO MODELO
+                # =====================================================================
+                with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                    if not self.config.model.get("use_dense", False):
+                        pred_feat = self.model(
+                            data['xyz'], data['features'],
+                            device=self.config.device,
+                            quantization_size=self.config.model.voxel_size
+                        )
+                    else:
+                        pred_feat = self.model(
+                            data['xyz_dense'].to(self.config.device),
+                            data['features_dense'].to(self.config.device)
+                        )
 
-                # inferência com a head completa (maior dim)
-                shape_emb = self._get_shape_embedding(pred_feat)  # (B, 1280)
-                logits    = shape_emb @ F.normalize(clip_text_feat, dim=-1).T
-                labels    = data['category'].to(self.config.device)
-                logits_all.append(logits.detach())
+                    # Extrai o embedding completo UMA VEZ (tamanho máximo)
+                    shape_emb_full = self._get_shape_embedding(pred_feat)  
+                # =====================================================================
+
+                # Converte para FP32 para evitar erro na multiplicação com o texto
+                shape_emb_full = shape_emb_full.float()
+
+                labels = data['category'].to(self.config.device)
                 labels_all.append(labels)
 
-        logits_all, labels_all = merge_results_dist(logits_all, labels_all)
+                for dim in nesting_list:
+                    # Fatia a Point Cloud e o Texto para a mesma dimensão do MRL
+                    shape_emb_dim = shape_emb_full[:, :dim]  
+                    clip_text_dim = clip_text_feat[:, :dim].float() # Garante que o texto está em FP32
+                    
+                    logits = shape_emb_dim @ F.normalize(clip_text_dim, dim=-1).T
+                    logits_all[dim].append(logits.detach())
+
+        merged_logits = {}
+        final_labels = None
+        for dim in nesting_list:
+            merged_l, merged_labels = merge_results_dist(logits_all[dim], labels_all)
+            merged_logits[dim] = merged_l
+            if final_labels is None:
+                final_labels = merged_labels 
+        labels_all = final_labels 
 
         if self.rank == 0:
-            if logits_all is None:
+            if labels_all is None:
                 return
 
             dataset_size = len(self.modelnet40_loader.dataset)
-            logits_all   = logits_all[:dataset_size]
-            labels_all   = labels_all[:dataset_size]
+            labels_all = labels_all[:dataset_size]
+            results_to_save = {"labels": labels_all, "dims": {}}
 
-            topk_acc, _     = self.accuracy(logits_all, labels_all, topk=(1, 3, 5))
-            per_cat_correct = torch.zeros(40).to(self.config.device)
-            per_cat_count   = torch.zeros(40).to(self.config.device)
+            logging.info("="*60)
+            logging.info("Test ModelNet40 per Dimension (Zero-Shot)")
+            header = f"{'Dim':<6} | {'Overall Acc':<11} | {'Class Acc':<10} | {'Top-1':<7} | {'Top-3':<7} | {'Top-5':<7}"
+            logging.info("-" * len(header))
+            logging.info(header)
+            logging.info("-" * len(header))
 
-            for i in range(40):
-                idx = labels_all == i
-                if idx.sum() > 0:
-                    per_cat_correct[i] = (logits_all[idx].argmax(dim=1) == labels_all[idx]).float().sum()
-                    per_cat_count[i]   = idx.sum()
+            for dim in nesting_list:
+                logits_dim = merged_logits[dim][:dataset_size]
+                topk_acc, _ = self.accuracy(logits_dim, labels_all, topk=(1, 3, 5))
+                
+                per_cat_correct = torch.zeros(40).to(self.config.device)
+                per_cat_count   = torch.zeros(40).to(self.config.device)
 
-            overall_acc = per_cat_correct.sum() / per_cat_count.sum()
-            per_cat_acc = per_cat_correct / per_cat_count
+                for i in range(40):
+                    idx = labels_all == i
+                    if idx.sum() > 0:
+                        per_cat_correct[i] = (logits_dim[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+                        per_cat_count[i]   = idx.sum()
 
-            if overall_acc > self.best_modelnet40_overall_acc:
-                self.best_modelnet40_overall_acc = overall_acc
-            if per_cat_acc.mean() > self.best_modelnet40_class_acc:
-                self.best_modelnet40_class_acc = per_cat_acc.mean()
+                valid_cats = per_cat_count > 0 
+                overall_acc = (per_cat_correct.sum() / per_cat_count.sum()).item()
+                per_cat_acc = (per_cat_correct[valid_cats] / per_cat_count[valid_cats]).mean().item()
 
-            logging.info(
-                'Test ModelNet40: overall acc: {0}({1}) class_acc: {2}({3})'.format(
-                    overall_acc, self.best_modelnet40_overall_acc,
-                    per_cat_acc.mean(), self.best_modelnet40_class_acc,
-                )
-            )
-            logging.info(
-                'Test ModelNet40: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(
-                    topk_acc[0].item(), topk_acc[1].item(), topk_acc[2].item()
-                )
-            )
-            torch.save(
-                {"logits": logits_all, "labels": labels_all,
-                "overall_acc": overall_acc, "class_acc": per_cat_acc.mean()},
-                os.path.join(self.config.ckpt_dir, f"modelnet40_epoch_{self.epoch}.pth"),
-            )
+                # Atualiza os melhores resultados apenas usando a dimensão máxima do MRL
+                if dim == nesting_list[-1]: 
+                    if overall_acc > self.best_modelnet40_overall_acc:
+                        self.best_modelnet40_overall_acc = overall_acc
+                    if per_cat_acc > self.best_modelnet40_class_acc:
+                        self.best_modelnet40_class_acc = per_cat_acc
+
+                logging.info(f"{dim:<6} | {overall_acc:<11.4f} | {per_cat_acc:<10.4f} | {topk_acc[0].item():<7.2f} | {topk_acc[1].item():<7.2f} | {topk_acc[2].item():<7.2f}")
+
+                results_to_save["dims"][dim] = {
+                    "logits": logits_dim, "overall_acc": overall_acc, "class_acc": per_cat_acc
+                }
+
+            logging.info("-" * len(header))
+            logging.info(f"Best (Max Dim) Overall: {self.best_modelnet40_overall_acc:.4f} | Class: {self.best_modelnet40_class_acc:.4f}")
+            logging.info("="*60)
+            torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"modelnet40_epoch_{self.epoch}.pth"))
+
 
     def test_objaverse_lvis(self):
         self.model.eval()
         if self.config.training.use_text_proj:
             self.text_proj.eval()
+        if self.config.training.use_image_proj:
+            self.image_proj.eval()
+        self._get_module(self.mrl_heads).eval()
 
-        clip_text_feat = torch.from_numpy(
-            self.objaverse_lvis_loader.dataset.clip_cat_feat
-        ).to(self.config.device)
+        clip_text_feat = torch.from_numpy(self.objaverse_lvis_loader.dataset.clip_cat_feat).to(self.config.device)
         if self.config.training.use_text_proj:
             clip_text_feat = self.text_proj(clip_text_feat)
 
-        per_cat_correct = torch.zeros(1156).to(self.config.device)
-        per_cat_count   = torch.zeros(1156).to(self.config.device)
+        heads = self._get_module(self.mrl_heads)
+        nesting_list = heads.nesting_list
 
-        logits_all = []
+        logits_all = {dim: [] for dim in nesting_list}
         labels_all = []
 
         with torch.no_grad():
             for data in tqdm(self.objaverse_lvis_loader):
-                if not self.config.model.get("use_dense", False):
-                    pred_feat = self.model(
-                        data['xyz'], data['features'],
-                        device=self.config.device,
-                        quantization_size=self.config.model.voxel_size
-                    )
-                else:
-                    pred_feat = self.model(
-                        data['xyz_dense'].to(self.config.device),
-                        data['features_dense'].to(self.config.device)
-                    )
+                
+                # =====================================================================
+                # AUTOCAST NO FORWARD
+                # =====================================================================
+                with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                    if not self.config.model.get("use_dense", False):
+                        pred_feat = self.model(
+                            data['xyz'], data['features'],
+                            device=self.config.device,
+                            quantization_size=self.config.model.voxel_size
+                        )
+                    else:
+                        pred_feat = self.model(
+                            data['xyz_dense'].to(self.config.device),
+                            data['features_dense'].to(self.config.device)
+                        )
 
-                shape_emb = self._get_shape_embedding(pred_feat)  # (B, 1280)
-                logits    = shape_emb @ F.normalize(clip_text_feat, dim=-1).T
-                labels    = data['category'].to(self.config.device)
-                logits_all.append(logits.detach())
+                    shape_emb_full = self._get_shape_embedding(pred_feat)  
+                # =====================================================================
+
+                # Converte para FP32
+                shape_emb_full = shape_emb_full.float()
+
+                labels = data['category'].to(self.config.device)
                 labels_all.append(labels)
 
-        logits_all, labels_all = merge_results_dist(logits_all, labels_all)
+                for dim in nesting_list:
+                    shape_emb_dim = shape_emb_full[:, :dim]  
+                    clip_text_dim = clip_text_feat[:, :dim].float() # Garante FP32
+                    
+                    logits = shape_emb_dim @ F.normalize(clip_text_dim, dim=-1).T
+                    logits_all[dim].append(logits.detach())
+
+        merged_logits = {}
+        final_labels = None
+        for dim in nesting_list:
+            merged_l, merged_labels = merge_results_dist(logits_all[dim], labels_all)
+            merged_logits[dim] = merged_l
+            if final_labels is None:
+                final_labels = merged_labels 
+        labels_all = final_labels 
 
         if self.rank == 0:
-            if logits_all is None:
+            if labels_all is None:
                 return
 
             dataset_size = len(self.objaverse_lvis_loader.dataset)
-            logits_all   = logits_all[:dataset_size]
-            labels_all   = labels_all[:dataset_size]
+            labels_all = labels_all[:dataset_size]
+            results_to_save = {"labels": labels_all, "dims": {}}
 
-            topk_acc, _ = self.accuracy(logits_all, labels_all, topk=(1, 3, 5))
+            logging.info("="*60)
+            logging.info("Test ObjaverseLVIS per Dimension (Zero-Shot)")
+            header = f"{'Dim':<6} | {'Overall Acc':<11} | {'Class Acc':<10} | {'Top-1':<7} | {'Top-3':<7} | {'Top-5':<7}"
+            logging.info("-" * len(header))
+            logging.info(header)
+            logging.info("-" * len(header))
 
-            for i in torch.unique(labels_all):
-                idx = labels_all == i
-                if idx.sum() > 0:
-                    per_cat_correct[i] = (logits_all[idx].argmax(dim=1) == labels_all[idx]).float().sum()
-                    per_cat_count[i]   = idx.sum()
+            if not hasattr(self, 'best_lvis_class_acc'):
+                self.best_lvis_class_acc = 0.0
 
-            overall_acc = per_cat_correct.sum() / per_cat_count.sum()
-            per_cat_acc = per_cat_correct / per_cat_count
+            for dim in nesting_list:
+                logits_dim = merged_logits[dim][:dataset_size]
+                topk_acc, _ = self.accuracy(logits_dim, labels_all, topk=(1, 3, 5))
+                
+                per_cat_correct = torch.zeros(1156).to(self.config.device)
+                per_cat_count   = torch.zeros(1156).to(self.config.device)
 
-            if overall_acc > self.best_lvis_acc:
-                self.best_lvis_acc = overall_acc
-                self.save_model('best_lvis')
+                for i in torch.unique(labels_all):
+                    idx = labels_all == i
+                    if idx.sum() > 0:
+                        per_cat_correct[i] = (logits_dim[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+                        per_cat_count[i]   = idx.sum()
 
-            logging.info('Test ObjaverseLVIS: overall acc: {0} class_acc: {1}'.format(
-                overall_acc, per_cat_acc.mean()))
-            logging.info('Test ObjaverseLVIS: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(
-                topk_acc[0].item(), topk_acc[1].item(), topk_acc[2].item()))
+                valid_cats = per_cat_count > 0 
+                overall_acc = (per_cat_correct.sum() / per_cat_count.sum()).item()
+                per_cat_acc = (per_cat_correct[valid_cats] / per_cat_count[valid_cats]).mean().item()
 
-            torch.save(
-                {"logits": logits_all, "labels": labels_all,
-                "overall_acc": overall_acc, "class_acc": per_cat_acc.mean()},
-                os.path.join(self.config.ckpt_dir, f"objaverse_lvis_epoch_{self.epoch}.pth"),
-            )
+                if dim == nesting_list[-1]: 
+                    is_best = False
+                    if overall_acc > self.best_lvis_acc:
+                        self.best_lvis_acc = overall_acc
+                        is_best = True
+                    if per_cat_acc > self.best_lvis_class_acc:
+                        self.best_lvis_class_acc = per_cat_acc
+                        is_best = True
+                        
+                    if is_best:
+                        self.save_model('best_lvis')
+
+                logging.info(f"{dim:<6} | {overall_acc:<11.4f} | {per_cat_acc:<10.4f} | {topk_acc[0].item():<7.2f} | {topk_acc[1].item():<7.2f} | {topk_acc[2].item():<7.2f}")
+
+                results_to_save["dims"][dim] = {
+                    "logits": logits_dim, "overall_acc": overall_acc, "class_acc": per_cat_acc
+                }
+
+            logging.info("-" * len(header))
+            logging.info(f"Best (Max Dim) Overall: {self.best_lvis_acc:.4f} | Class: {self.best_lvis_class_acc:.4f}")
+            logging.info("="*60)
+            torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"objaverse_lvis_epoch_{self.epoch}.pth"))
 
 
     def test_scanobjectnn(self):
         self.model.eval()
         if self.config.training.use_text_proj:
             self.text_proj.eval()
+        if self.config.training.use_image_proj:
+            self.image_proj.eval()
+        self._get_module(self.mrl_heads).eval()
 
-        clip_text_feat = torch.from_numpy(
-            self.scanobjectnn_loader.dataset.clip_cat_feat
-        ).to(self.config.device)
+        clip_text_feat = torch.from_numpy(self.scanobjectnn_loader.dataset.clip_cat_feat).to(self.config.device)
         if self.config.training.use_text_proj:
             clip_text_feat = self.text_proj(clip_text_feat)
 
-        per_cat_correct = torch.zeros(15).to(self.config.device)
-        per_cat_count   = torch.zeros(15).to(self.config.device)
+        heads = self._get_module(self.mrl_heads)
+        nesting_list = heads.nesting_list
 
-        logits_all = []
+        logits_all = {dim: [] for dim in nesting_list}
         labels_all = []
 
         with torch.no_grad():
             for data in self.scanobjectnn_loader:
-                if not self.config.model.get("use_dense", False):
-                    pred_feat = self.model(
-                        data['xyz'], data['features'],
-                        device=self.config.device,
-                        quantization_size=self.config.model.voxel_size
-                    )
-                else:
-                    pred_feat = self.model(
-                        data['xyz_dense'].to(self.config.device),
-                        data['features_dense'].to(self.config.device)
-                    )
+                
+                # =====================================================================
+                # AUTOCAST NO FORWARD
+                # =====================================================================
+                with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                    if not self.config.model.get("use_dense", False):
+                        pred_feat = self.model(
+                            data['xyz'], data['features'],
+                            device=self.config.device,
+                            quantization_size=self.config.model.voxel_size
+                        )
+                    else:
+                        pred_feat = self.model(
+                            data['xyz_dense'].to(self.config.device),
+                            data['features_dense'].to(self.config.device)
+                        )
 
-                shape_emb = self._get_shape_embedding(pred_feat)  # (B, 1280)
-                logits    = shape_emb @ F.normalize(clip_text_feat, dim=-1).T
-                labels    = data['category'].to(self.config.device)
-                logits_all.append(logits.detach())
+                    shape_emb_full = self._get_shape_embedding(pred_feat)  
+                # =====================================================================
+
+                # Converte para FP32
+                shape_emb_full = shape_emb_full.float()
+
+                labels = data['category'].to(self.config.device)
                 labels_all.append(labels)
 
-        logits_all, labels_all = merge_results_dist(logits_all, labels_all)
+                for dim in nesting_list:
+                    shape_emb_dim = shape_emb_full[:, :dim]  
+                    clip_text_dim = clip_text_feat[:, :dim].float() # Garante FP32
+                    
+                    logits = shape_emb_dim @ F.normalize(clip_text_dim, dim=-1).T
+                    logits_all[dim].append(logits.detach())
+
+        merged_logits = {}
+        final_labels = None
+        for dim in nesting_list:
+            merged_l, merged_labels = merge_results_dist(logits_all[dim], labels_all)
+            merged_logits[dim] = merged_l
+            if final_labels is None:
+                final_labels = merged_labels 
+        labels_all = final_labels 
 
         if self.rank == 0:
-            if logits_all is None:
+            if labels_all is None:
                 return
 
             dataset_size = len(self.scanobjectnn_loader.dataset)
-            logits_all   = logits_all[:dataset_size]
-            labels_all   = labels_all[:dataset_size]
+            labels_all = labels_all[:dataset_size]
+            results_to_save = {"labels": labels_all, "dims": {}}
 
-            topk_acc, _ = self.accuracy(logits_all, labels_all, topk=(1, 3, 5))
+            logging.info("="*60)
+            logging.info("Test ScanObjectNN per Dimension (Zero-Shot)")
+            header = f"{'Dim':<6} | {'Overall Acc':<11} | {'Class Acc':<10} | {'Top-1':<7} | {'Top-3':<7} | {'Top-5':<7}"
+            logging.info("-" * len(header))
+            logging.info(header)
+            logging.info("-" * len(header))
 
-            for i in range(15):
-                idx = labels_all == i
-                if idx.sum() > 0:
-                    per_cat_correct[i] = (logits_all[idx].argmax(dim=1) == labels_all[idx]).float().sum()
-                    per_cat_count[i]   = idx.sum()
+            for dim in nesting_list:
+                logits_dim = merged_logits[dim][:dataset_size]
+                topk_acc, _ = self.accuracy(logits_dim, labels_all, topk=(1, 3, 5))
+                
+                per_cat_correct = torch.zeros(15).to(self.config.device)
+                per_cat_count   = torch.zeros(15).to(self.config.device)
 
-            overall_acc = per_cat_correct.sum() / per_cat_count.sum()
-            per_cat_acc = per_cat_correct / per_cat_count
+                for i in range(15):
+                    idx = labels_all == i
+                    if idx.sum() > 0:
+                        per_cat_correct[i] = (logits_dim[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+                        per_cat_count[i]   = idx.sum()
 
-            logging.info('Test ScanObjectNN: overall acc: {0} class_acc: {1}'.format(
-                overall_acc, per_cat_acc.mean()))
-            logging.info('Test ScanObjectNN: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(
-                topk_acc[0].item(), topk_acc[1].item(), topk_acc[2].item()))
+                valid_cats = per_cat_count > 0 
+                overall_acc = (per_cat_correct.sum() / per_cat_count.sum()).item()
+                per_cat_acc = (per_cat_correct[valid_cats] / per_cat_count[valid_cats]).mean().item()
 
-            torch.save(
-                {"logits": logits_all, "labels": labels_all,
-                "overall_acc": overall_acc, "class_acc": per_cat_acc.mean()},
-                os.path.join(self.config.ckpt_dir, f"scanobjectnn_epoch_{self.epoch}.pth"),
-            )   
+                logging.info(f"{dim:<6} | {overall_acc:<11.4f} | {per_cat_acc:<10.4f} | {topk_acc[0].item():<7.2f} | {topk_acc[1].item():<7.2f} | {topk_acc[2].item():<7.2f}")
+
+                results_to_save["dims"][dim] = {
+                    "logits": logits_dim, "overall_acc": overall_acc, "class_acc": per_cat_acc
+                }
+
+            logging.info("-" * len(header))
+            logging.info("="*60)
+            torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"scanobjectnn_epoch_{self.epoch}.pth"))
+
+    # def test_modelnet40(self):
+    #     self.model.eval()
+    #     if self.config.training.use_text_proj:
+    #         self.text_proj.eval()
+    #     clip_text_feat = torch.from_numpy(self.modelnet40_loader.dataset.clip_cat_feat).to(self.config.device)
+    #     if self.config.training.use_text_proj:
+    #         clip_text_feat = self.text_proj(clip_text_feat)
+
+    #     logits_all = []
+    #     labels_all = []
+
+    #     with torch.no_grad():
+    #         for data in tqdm(self.modelnet40_loader):
+    #             if not self.config.model.get("use_dense", False):
+    #                 pred_feat = self.model(
+    #                     data['xyz'], data['features'],
+    #                     device=self.config.device,
+    #                     quantization_size=self.config.model.voxel_size
+    #                 )
+    #             else:
+    #                 pred_feat = self.model(
+    #                     data['xyz_dense'].to(self.config.device),
+    #                     data['features_dense'].to(self.config.device)
+    #                 )
+
+    #             # inferência com a head completa (maior dim)
+    #             shape_emb = self._get_shape_embedding(pred_feat)  # (B, 1280)
+    #             logits    = shape_emb @ F.normalize(clip_text_feat, dim=-1).T
+    #             labels    = data['category'].to(self.config.device)
+    #             logits_all.append(logits.detach())
+    #             labels_all.append(labels)
+
+    #     logits_all, labels_all = merge_results_dist(logits_all, labels_all)
+
+    #     if self.rank == 0:
+    #         if logits_all is None:
+    #             return
+
+    #         dataset_size = len(self.modelnet40_loader.dataset)
+    #         logits_all   = logits_all[:dataset_size]
+    #         labels_all   = labels_all[:dataset_size]
+
+    #         topk_acc, _     = self.accuracy(logits_all, labels_all, topk=(1, 3, 5))
+    #         per_cat_correct = torch.zeros(40).to(self.config.device)
+    #         per_cat_count   = torch.zeros(40).to(self.config.device)
+
+    #         for i in range(40):
+    #             idx = labels_all == i
+    #             if idx.sum() > 0:
+    #                 per_cat_correct[i] = (logits_all[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+    #                 per_cat_count[i]   = idx.sum()
+
+    #         overall_acc = per_cat_correct.sum() / per_cat_count.sum()
+    #         per_cat_acc = per_cat_correct / per_cat_count
+
+    #         if overall_acc > self.best_modelnet40_overall_acc:
+    #             self.best_modelnet40_overall_acc = overall_acc
+    #         if per_cat_acc.mean() > self.best_modelnet40_class_acc:
+    #             self.best_modelnet40_class_acc = per_cat_acc.mean()
+
+    #         logging.info(
+    #             'Test ModelNet40: overall acc: {0}({1}) class_acc: {2}({3})'.format(
+    #                 overall_acc, self.best_modelnet40_overall_acc,
+    #                 per_cat_acc.mean(), self.best_modelnet40_class_acc,
+    #             )
+    #         )
+    #         logging.info(
+    #             'Test ModelNet40: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(
+    #                 topk_acc[0].item(), topk_acc[1].item(), topk_acc[2].item()
+    #             )
+    #         )
+    #         torch.save(
+    #             {"logits": logits_all, "labels": labels_all,
+    #             "overall_acc": overall_acc, "class_acc": per_cat_acc.mean()},
+    #             os.path.join(self.config.ckpt_dir, f"modelnet40_epoch_{self.epoch}.pth"),
+    #         )
+
 
     # def test_objaverse_lvis(self):
     #     self.model.eval()
-    #     # self.text_alignment_adapter.eval()
-    #     # self.image_alignment_adapter.eval()
     #     if self.config.training.use_text_proj:
     #         self.text_proj.eval()
-    #     clip_text_feat = torch.from_numpy(self.objaverse_lvis_loader.dataset.clip_cat_feat).cuda()
+
+    #     clip_text_feat = torch.from_numpy(
+    #         self.objaverse_lvis_loader.dataset.clip_cat_feat
+    #     ).to(self.config.device)
     #     if self.config.training.use_text_proj:
     #         clip_text_feat = self.text_proj(clip_text_feat)
-    #     per_cat_correct = torch.zeros(1156).cuda()
-    #     per_cat_count = torch.zeros(1156).cuda()
-    #     category2idx = self.objaverse_lvis_loader.dataset.category2idx
-    #     idx2category = {v: k for k, v in category2idx.items()}
 
-    #     logits_image_all = []
-    #     logits_text_all = []
+    #     per_cat_correct = torch.zeros(1156).to(self.config.device)
+    #     per_cat_count   = torch.zeros(1156).to(self.config.device)
+
+    #     logits_all = []
     #     labels_all = []
+
     #     with torch.no_grad():
     #         for data in tqdm(self.objaverse_lvis_loader):
     #             if not self.config.model.get("use_dense", False):
-    #                 pred_feat = self.model(data['xyz'], data['features'], \
-    #                                        device=self.config.device, \
-    #                                        quantization_size=self.config.model.voxel_size)
+    #                 pred_feat = self.model(
+    #                     data['xyz'], data['features'],
+    #                     device=self.config.device,
+    #                     quantization_size=self.config.model.voxel_size
+    #                 )
     #             else:
-    #                 pred_feat = self.model(data['xyz_dense'].to(self.config.device), data['features_dense'].to(self.config.device))
+    #                 pred_feat = self.model(
+    #                     data['xyz_dense'].to(self.config.device),
+    #                     data['features_dense'].to(self.config.device)
+    #                 )
 
-    #             # pred_feat_text = F.normalize(self.text_alignment_adapter(pred_feat), dim=1)
-    #             # pred_feat_image = F.normalize(self.image_alignment_adapter(pred_feat), dim=1)
-    #             # print("pred_feat_text", pred_feat_text.shape)
-    #             # print("clip_text_feat", clip_text_feat.shape)
-    #             logits_text = pred_feat_text @ F.normalize(clip_text_feat, dim=1).T
-    #             logits_image = pred_feat_image @ F.normalize(clip_text_feat, dim=1).T
-    #             labels = data['category'].to(self.config.device)
-    #             logits_image_all.append(logits_image.detach())
-    #             logits_text_all.append(logits_text.detach())
+    #             shape_emb = self._get_shape_embedding(pred_feat)  # (B, 1280)
+    #             logits    = shape_emb @ F.normalize(clip_text_feat, dim=-1).T
+    #             labels    = data['category'].to(self.config.device)
+    #             logits_all.append(logits.detach())
     #             labels_all.append(labels)
 
-    #     logits_image_all, logits_text_all, labels_all = merge_two_branch_results_dist(
-    #         os.path.join(self.config.ckpt_dir, "objaverse_dir"),
-    #         logits_image_all, logits_text_all, labels_all)
+    #     logits_all, labels_all = merge_results_dist(logits_all, labels_all)
 
     #     if self.rank == 0:
+    #         if logits_all is None:
+    #             return
 
-    #         logits_all = 1 * logits_text_all + self.alpha * logits_image_all
-    #         topk_acc, correct = self.accuracy(logits_all, labels_all, topk=(1, 3, 5,))
+    #         dataset_size = len(self.objaverse_lvis_loader.dataset)
+    #         logits_all   = logits_all[:dataset_size]
+    #         labels_all   = labels_all[:dataset_size]
 
-    #         # calculate per class accuracy
+    #         topk_acc, _ = self.accuracy(logits_all, labels_all, topk=(1, 3, 5))
+
     #         for i in torch.unique(labels_all):
-    #             idx = (labels_all == i)
+    #             idx = labels_all == i
     #             if idx.sum() > 0:
     #                 per_cat_correct[i] = (logits_all[idx].argmax(dim=1) == labels_all[idx]).float().sum()
-    #                 per_cat_count[i] = idx.sum()
+    #                 per_cat_count[i]   = idx.sum()
 
     #         overall_acc = per_cat_correct.sum() / per_cat_count.sum()
     #         per_cat_acc = per_cat_correct / per_cat_count
@@ -674,72 +869,83 @@ class TrainerToMRL(object):
     #             self.best_lvis_acc = overall_acc
     #             self.save_model('best_lvis')
 
-    #         logging.info(
-    #             'Test ObjaverseLVIS: overall acc: {0} class_acc: {1}'.format(overall_acc, per_cat_acc.mean()))
-    #         logging.info('Test ObjaverseLVIS: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(topk_acc[0].item(),
-    #                                                                                             topk_acc[1].item(),
-    #                                                                                             topk_acc[2].item()))
+    #         logging.info('Test ObjaverseLVIS: overall acc: {0} class_acc: {1}'.format(
+    #             overall_acc, per_cat_acc.mean()))
+    #         logging.info('Test ObjaverseLVIS: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(
+    #             topk_acc[0].item(), topk_acc[1].item(), topk_acc[2].item()))
+
+    #         torch.save(
+    #             {"logits": logits_all, "labels": labels_all,
+    #             "overall_acc": overall_acc, "class_acc": per_cat_acc.mean()},
+    #             os.path.join(self.config.ckpt_dir, f"objaverse_lvis_epoch_{self.epoch}.pth"),
+    #         )
+
 
     # def test_scanobjectnn(self):
     #     self.model.eval()
-    #     # self.text_alignment_adapter.eval()
-    #     # self.image_alignment_adapter.eval()
     #     if self.config.training.use_text_proj:
     #         self.text_proj.eval()
-    #     clip_text_feat = torch.from_numpy(self.scanobjectnn_loader.dataset.clip_cat_feat).to(self.config.device)
+
+    #     clip_text_feat = torch.from_numpy(
+    #         self.scanobjectnn_loader.dataset.clip_cat_feat
+    #     ).to(self.config.device)
     #     if self.config.training.use_text_proj:
     #         clip_text_feat = self.text_proj(clip_text_feat)
-    #     per_cat_correct = torch.zeros(15).to(self.config.device)
-    #     per_cat_count = torch.zeros(15).to(self.config.device)
-    #     category2idx = self.scanobjectnn_loader.dataset.category2idx
-    #     idx2category = {v: k for k, v in category2idx.items()}
 
-    #     logits_image_all = []
-    #     logits_text_all = []
+    #     per_cat_correct = torch.zeros(15).to(self.config.device)
+    #     per_cat_count   = torch.zeros(15).to(self.config.device)
+
+    #     logits_all = []
     #     labels_all = []
+
     #     with torch.no_grad():
     #         for data in self.scanobjectnn_loader:
     #             if not self.config.model.get("use_dense", False):
-    #                 pred_feat = self.model(data['xyz'], data['features'], \
-    #                                        device=self.config.device, \
-    #                                        quantization_size=self.config.model.voxel_size)
+    #                 pred_feat = self.model(
+    #                     data['xyz'], data['features'],
+    #                     device=self.config.device,
+    #                     quantization_size=self.config.model.voxel_size
+    #                 )
     #             else:
-    #                 pred_feat = self.model(data['xyz_dense'].to(self.config.device), data['features_dense'].to(self.config.device))
+    #                 pred_feat = self.model(
+    #                     data['xyz_dense'].to(self.config.device),
+    #                     data['features_dense'].to(self.config.device)
+    #                 )
 
-    #             # pred_feat_text = F.normalize(self.text_alignment_adapter(pred_feat), dim=1)
-    #             # pred_feat_image = F.normalize(self.image_alignment_adapter(pred_feat), dim=1)
-
-    #             logits_text = pred_feat_text @ F.normalize(clip_text_feat, dim=1).T
-    #             logits_image = pred_feat_image @ F.normalize(clip_text_feat, dim=1).T
-
-    #             labels = data['category'].to(self.config.device)
-    #             logits_image_all.append(logits_image.detach())
-    #             logits_text_all.append(logits_text.detach())
+    #             shape_emb = self._get_shape_embedding(pred_feat)  # (B, 1280)
+    #             logits    = shape_emb @ F.normalize(clip_text_feat, dim=-1).T
+    #             labels    = data['category'].to(self.config.device)
+    #             logits_all.append(logits.detach())
     #             labels_all.append(labels)
 
-    #     logits_image_all, logits_text_all, labels_all = merge_two_branch_results_dist(
-    #         os.path.join(self.config.ckpt_dir, "scanobjectnn_dir"),
-    #         logits_image_all, logits_text_all, labels_all)
+    #     logits_all, labels_all = merge_results_dist(logits_all, labels_all)
 
     #     if self.rank == 0:
+    #         if logits_all is None:
+    #             return
 
-    #         logits_all = 1 * logits_text_all + self.alpha * logits_image_all
+    #         dataset_size = len(self.scanobjectnn_loader.dataset)
+    #         logits_all   = logits_all[:dataset_size]
+    #         labels_all   = labels_all[:dataset_size]
 
-    #         topk_acc, correct = self.accuracy(logits_all, labels_all, topk=(1, 3, 5,))
+    #         topk_acc, _ = self.accuracy(logits_all, labels_all, topk=(1, 3, 5))
 
-    #         # calculate per class accuracy
     #         for i in range(15):
-    #             idx = (labels_all == i)
+    #             idx = labels_all == i
     #             if idx.sum() > 0:
     #                 per_cat_correct[i] = (logits_all[idx].argmax(dim=1) == labels_all[idx]).float().sum()
-    #                 per_cat_count[i] = idx.sum()
+    #                 per_cat_count[i]   = idx.sum()
 
     #         overall_acc = per_cat_correct.sum() / per_cat_count.sum()
     #         per_cat_acc = per_cat_correct / per_cat_count
 
-    #         logging.info(
-    #             'Test ScanObjectNN: overall acc: {0} class_acc: {1}'.format(overall_acc, per_cat_acc.mean()))
-    #         logging.info('Test ScanObjectNN: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(topk_acc[0].item(),
-    #                                                                                            topk_acc[1].item(),
-    #                                                                                            topk_acc[2].item()))
+    #         logging.info('Test ScanObjectNN: overall acc: {0} class_acc: {1}'.format(
+    #             overall_acc, per_cat_acc.mean()))
+    #         logging.info('Test ScanObjectNN: top1_acc: {0} top3_acc: {1} top5_acc: {2}'.format(
+    #             topk_acc[0].item(), topk_acc[1].item(), topk_acc[2].item()))
 
+    #         torch.save(
+    #             {"logits": logits_all, "labels": labels_all,
+    #             "overall_acc": overall_acc, "class_acc": per_cat_acc.mean()},
+    #             os.path.join(self.config.ckpt_dir, f"scanobjectnn_epoch_{self.epoch}.pth"),
+    #         )   
