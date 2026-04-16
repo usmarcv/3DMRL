@@ -21,8 +21,11 @@ from trainers.mlp import MLP, MLP_ME
 from trainers.testado_mrltamm import CLIP_Adapter_Trainer
 # from trainers.mrltamm2 import TAMM_Trainer
 
-from trainers.mrl_trainer_adapters import MRLProjectionHeads
+# from trainers.mrl_trainer_adapters import MRLProjectionHeads
 
+
+# our new era here
+from trainers.MRL import MRL_Projection_Layer
 from trainers.trainer_3dmrl import TrainerToMRL
 
 from utils.logger import setup_logging
@@ -154,11 +157,12 @@ def main(cli_args, extras):
             text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
 
 
-            mrl_heads = MRLProjectionHeads(
-                            mrl_dims=config.mrl.dims,
-                            clip_dim=config.clip_embed_dim).to(device)
+            mrl_heads = MRL_Projection_Layer(nesting_list=config.mrl.nesting_dims,
+                                            out_dim=config.mrl.out_dim,
+                                            efficient=config.mrl.efficient
+                                            ).to(device)
 
-            mrl_heads   = DDP(mrl_heads,   device_ids=[rank], output_device=rank, find_unused_parameters=False)
+            mrl_heads = DDP(mrl_heads,   device_ids=[rank], output_device=rank, find_unused_parameters=False)
 
 
             params_to_optimize =  list(model.parameters()) + list(logit_scale.parameters()) + list(mrl_heads.parameters())
@@ -288,14 +292,13 @@ def main(cli_args, extras):
                 objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
             )
 
-        # Retomar Treinamento se necessário
+
         if config.resume is not None:
             trainer.load_from_checkpoint(config.resume)
         elif config.autoresume:
             if os.path.exists(os.path.join(config.ckpt_dir, 'latest.pt')):
                 trainer.load_from_checkpoint(os.path.join(config.ckpt_dir, 'latest.pt'))
 
-        # Inicia o loop de épocas
         trainer.train()
 
     dist.barrier()
