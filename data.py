@@ -187,6 +187,35 @@ class Four(Dataset):
 
 
 
+    # def __getitem__(self, index: int):
+    #     if self.use_knn_negative_sample == False:
+    #         if self.split[index]['dataset'] == "Objaverse":
+    #             return self.get_objaverse(self.split[index])
+    #         else:
+    #             return self.get_others(self.split[index])
+    #     else:
+    #         data_list = []
+    #         # random select a seed shape from split
+    #         index = random.randint(0, len(self.split) - 1)
+    #         uid = self.split[index]['id']
+    #         # randomly pick (negative_sample_num - 1) neighbors from 31 nearest neighbors
+    #         knn_idx = [0] + (np.random.choice(31, self.negative_sample_num - 1, replace=False) + 1).tolist() 
+    #         for i in knn_idx:
+    #             idx = self.uid_to_index[self.knn['name'][self.knn['index'][uid][i]]]
+    #             if self.split[idx]['dataset'] == "Objaverse":
+    #                 data_list.append(self.get_objaverse(self.split[idx]))
+    #             else:
+    #                 data_list.append(self.get_others(self.split[idx]))
+    #         return data_list
+
+    # def __len__(self):
+    #     if self.use_knn_negative_sample == False:
+    #         return len(self.split)
+    #     else:
+    #         return len(self.split) // self.negative_sample_num
+
+
+
 
 
 def minkowski_collate_fn(list_data):

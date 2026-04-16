@@ -19,7 +19,14 @@ from trainers.mlp import MLP, MLP_ME
 
 # Nossos Trainers
 from trainers.testado_mrltamm import CLIP_Adapter_Trainer
-from trainers.mrltamm2 import TAMM_Trainer
+# from trainers.mrltamm2 import TAMM_Trainer
+
+# from trainers.mrl_trainer_adapters import MRLProjectionHeads
+
+
+# our new era here
+from trainers.MRL import MRL_Projection_Layer
+from trainers.trainer_3dmrl import TrainerToMRL
 
 from utils.logger import setup_logging
 from utils.misc import load_config, dump_config
@@ -118,6 +125,47 @@ def main(cli_args, extras):
             text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
 
             params_to_optimize = list(image_adapter.parameters()) + list(text_adapter.parameters()) + list(logit_scale.parameters())
+
+            if config.training.use_image_proj:
+                params_to_optimize += list(image_proj.parameters())
+            if config.training.use_text_proj:
+                params_to_optimize += list(text_proj.parameters())
+
+
+        if config.trainer == "3dmrl_trainer":
+            if rank == 0:
+                logging.info("--- Starting 3DMRL trainer... ---")
+
+            model = models.make(config).to(device)    
+            if config.model.name.startswith('Mink'):
+                model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
+                if rank == 0: logging.info("Usando MinkowskiSyncBatchNorm no PointBERT")
+            else:
+                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+                if rank == 0: logging.info("Usando SyncBatchNorm no PointBERT")
+
+            model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+            
+            if rank == 0:
+                total_params = sum(p.numel() for p in model.parameters())
+                logging.info(f"Network: {config.model.name}, Parâmetros de Treino: {total_params}")
+            
+            image_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
+            text_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device) 
+            
+            image_proj = DDP(image_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+            text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
+
+            mrl_heads = MRL_Projection_Layer(nesting_list=config.mrl.nesting_dims,
+                                            out_dim=config.mrl.out_dim,
+                                            efficient=config.mrl.efficient
+                                            ).to(device)
+
+            mrl_heads = DDP(mrl_heads,   device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
+
+            params_to_optimize =  list(model.parameters()) + list(logit_scale.parameters()) + list(mrl_heads.parameters())
 
             if config.training.use_image_proj:
                 params_to_optimize += list(image_proj.parameters())
@@ -225,6 +273,15 @@ def main(cli_args, extras):
                 optimizer=optimizer, scheduler=scheduler, train_loader=train_loader
             )
             
+        elif config.trainer == "3dmrl_trainer":
+            trainer = TrainerToMRL(
+                rank=rank, config=config, model=model, logit_scale=logit_scale, 
+                image_proj=image_proj, text_proj=text_proj, mrl_heads=mrl_heads,
+                optimizer=optimizer, scheduler=scheduler, train_loader=train_loader,
+                modelnet40_loader=modelnet40_loader, 
+                objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
+            )
+
         elif config.trainer == "mrl_alignment":
             trainer = TAMM_Trainer(
                 rank=rank, config=config, model=model, logit_scale=logit_scale, 
@@ -235,14 +292,13 @@ def main(cli_args, extras):
                 objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
             )
 
-        # Retomar Treinamento se necessário
+
         if config.resume is not None:
             trainer.load_from_checkpoint(config.resume)
         elif config.autoresume:
             if os.path.exists(os.path.join(config.ckpt_dir, 'latest.pt')):
                 trainer.load_from_checkpoint(os.path.join(config.ckpt_dir, 'latest.pt'))
 
-        # Inicia o loop de épocas
         trainer.train()
 
     dist.barrier()

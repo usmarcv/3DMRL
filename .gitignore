@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 #Personal folder and files 
 
 MinkowskiEngine/
@@ -7,6 +8,21 @@ dataset/
 exp/
 tamm_models_ckpt/
 
+=======
+./exp
+exp
+./MinkowskiEngine
+./data
+data
+./tamm_models_ckpt
+tamm_models_ckpt
+assets/
+MinkowskiEngine/
+logs_treinamento/
+./models/
+./__pycache__/
+*.pyc
+>>>>>>> feature/mrl-loss
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

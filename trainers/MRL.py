@@ -7,8 +7,40 @@ import torch.distributed as dist
 
 
 '''
-Loss function for Matryoshka Representation Learning 
+Loss function for 3D Matryoshka Representation Learning 
 '''
+class MRL_Projection_Layer(nn.Module):
+    def __init__(self, nesting_list: List, out_dim=1280, efficient=False, **kwargs):
+        super(MRL_Projection_Layer, self).__init__()
+        self.nesting_list = nesting_list
+        self.out_dim = out_dim # your dim clip expects
+        self.efficient = efficient # in this parameter is the total dim
+        
+        if self.efficient:
+            # Cria apenas UMA matriz grande projetando a maior fatia para o CLIP
+            self.proj_0 = nn.Linear(nesting_list[-1], self.out_dim, **kwargs)      
+        else:   
+            # Cria uma camada de projeção independente para cada granularidade
+            for i, dim in enumerate(self.nesting_list):
+                setattr(self, f"proj_{i}", nn.Linear(dim, self.out_dim, **kwargs))    
+
+    def forward(self, x):
+        projected_logits = ()
+        for i, dim in enumerate(self.nesting_list):
+            if self.efficient:
+                # Fatiamento inteligente de pesos
+                weight_slice = self.proj_0.weight[:, :dim]
+                out = torch.matmul(x[:, :dim], weight_slice.t())
+                if self.proj_0.bias is not None:
+                    out += self.proj_0.bias
+                projected_logits += (out, )
+            else:
+                # Projeção tradicional por camadas separadas
+                projected_logits += (getattr(self, f"proj_{i}")(x[:, :dim]),)
+
+        return projected_logits
+
+
 
 
 
@@ -31,6 +63,7 @@ class GatherLayer(torch.autograd.Function):
         dist.all_reduce(all_gradients)
         # Cada GPU pega de volta apenas o gradiente correspondente ao seu 'rank'
         return all_gradients[dist.get_rank()]
+
 
 def gather_features(features):
     """Função auxiliar para aplicar o GatherLayer e concatenar"""
