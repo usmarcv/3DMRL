@@ -22,10 +22,7 @@ mrl:
 
 
 model:
-  name: PointBERT
-  scaling: 4
-  use_dense: True
-  proj: True # pointbert out (512) -> to 1280 (clip feat dim)
+  name: MinkResNet34
   in_channel: 6
   out_channel: ${clip_embed_dim}
   embedding_channel: 1024
@@ -38,7 +35,7 @@ training:
   scheduler: "cosine"
   max_epoch: 200 # 200
   test_epoch: 30 # 70
-  lr: 5e-4
+  lr: 1e-3
   lr_decay: 30
   lr_decay_rate: 0.95
   beta1: 0.9
