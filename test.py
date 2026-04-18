@@ -17,12 +17,7 @@ from models.LogitScaleNetwork import LogitScaleNetwork
 from models.clip_adapter import NewCLIP
 from trainers.mlp import MLP, MLP_ME
 
-# Nossos Trainers
 from trainers.testado_mrltamm import CLIP_Adapter_Trainer
-# from trainers.mrltamm2 import TAMM_Trainer
-
-# from trainers.mrl_trainer_adapters import MRLProjectionHeads
-
 
 # our new era here
 from trainers.MRL import MRL_Projection_Layer
@@ -85,9 +80,6 @@ def main(cli_args, extras):
         logging.info("Using {} GPU(s).".format(config.ngpu))
 
     if config.train:
-        # ==============================================================================
-        # 1. SETUP DE DADOS COMUM E LOGIT SCALE
-        # ==============================================================================
         train_loader = data.make(config, 'train', rank, world_size)
         
         # Loaders de teste
@@ -104,11 +96,7 @@ def main(cli_args, extras):
         # Variável para guardar os parâmetros que serão treinados
         params_to_optimize = []
 
-        # ==============================================================================
-        # 2. INSTANCIAÇÃO DOS MODELOS (BASEADO NO ESTÁGIO)
-        # ==============================================================================
-        
-        # ------------------- ESTÁGIO 1: ADAPTADORES 2D/TEXTO --------------------------
+
         if config.trainer == "clip_adapter_trainer":
             if rank == 0:
                 logging.info("--- Iniciando Estágio 1: Treinamento MRL dos Adaptadores ---")
@@ -301,9 +289,9 @@ def main(cli_args, extras):
 
         if config.resume is not None:
             trainer.load_from_checkpoint(config.resume)
-            trainer.test_scanobjectnn()
             trainer.test_modelnet40()
             trainer.test_objaverse_lvis()
+            trainer.test_scanobjectnn()
             
 
     dist.barrier()
