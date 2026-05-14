@@ -2,21 +2,20 @@ project_name: 3DMRL
 clip_embed_dim: 1280
 clip_embed_version: OpenCLIP
 
-
 trainer: '3dmrl_trainer'
-
 
 fix_seed: True
 seed: 0
 
 
-batch_size: 128 #global 4 gpus 512
+batch_size: 128 
 num_points: 10000
 num_workers: 10
 
 
 mrl:
-  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280] #log-based nesting dimensions
+  # [8, 16 40, 80, 160, 320, 640, 1280]
   out_dim: ${clip_embed_dim}
   efficient: False 
 
@@ -109,6 +108,16 @@ objaverse_lvis:
 
 
 scanobjectnn:
+  data_path: data/meta_data/scanobjectnn/xyz_label.npy
+  num_points: ${num_points}
+  num_workers: 6
+  test_batch_size: 64
+  clip_feat_path: data/meta_data/scanobjectnn/cat_name_pt_feat.npy
+  y_up: True
+
+
+Scannet:
+  split: data/meta_data/scanobjectnn/xyz_label.npy
   data_path: data/meta_data/scanobjectnn/xyz_label.npy
   num_points: ${num_points}
   num_workers: 6

@@ -1,0 +1,72 @@
+project_name: 3DMRL-linear-probing
+clip_embed_dim: 1280
+trainer: linear_probing
+
+fix_seed: True
+seed: 0
+device: cuda
+
+batch_size: 8
+num_workers: 8
+num_points: 8192
+
+model:
+  name: PointBERT
+  scaling: 4
+  use_dense: True
+  proj: True # pointbert out (512) -> to 1280 (clip feat dim)
+  in_channel: 6
+  out_channel: ${clip_embed_dim}
+  embedding_channel: 1024
+  voxel_size: 0.02
+
+
+pretrained_model:
+  path: exp/3DMRL_PointBERT_bs128_lr5e-4_n4_split_all@20260420-152050/ckpt/epoch_126.pt
+  # path: exp/3DMRL_PointBERT_bs128_lr5e-4_n4_effFalse_split_shapenet_only@20260506-151705/ckpt/epoch_37.pt
+  # path: ckpts_methods/model.pt
+
+
+mrl:
+  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  out_dim: ${clip_embed_dim}
+  efficient: False 
+
+
+linear_layer:
+  mrl_dims: [1280]
+  out_dim: 40   # ModelNet40
+
+
+training:
+  lr: 1e-5
+  max_epoch: 300
+  warmup_epoch: 10
+  scheduler: cosine
+  weight_decay: 5e-2
+  save_freq: 50
+
+
+dataset:
+  NAME: ModelNet  
+  NUM_CATEGORY: 40
+  DATA_PATH: data/ModelNet/modelnet40_normal_resampled/ 
+  N_POINTS: 8192
+  USE_NORMALS: FALSE
+  subset: train         
+  num_workers: 8
+  batch_size: ${batch_size} 
+  # seed: 0
+
+
+test_dataset:
+  NAME: ModelNet
+  NUM_CATEGORY: 40
+  DATA_PATH: data/ModelNet/modelnet40_normal_resampled/ 
+  N_POINTS: 8192        
+  USE_NORMALS: FALSE    
+  subset: test          
+  num_workers: 8
+  batch_size: ${batch_size} 
+  # seed: 0
+

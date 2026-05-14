@@ -88,7 +88,7 @@ modelnet40:
   test_split: data/meta_data/modelnet40/test_split.json
   test_pc: data/meta_data/modelnet40/test_pc.npy
   num_points: ${num_points}
-  num_workers: 6
+  num_workers: 2
   test_batch_size: 64
   clip_feat_path: data/meta_data/modelnet40/cat_name_pt_feat.npy
   y_up: True
@@ -98,7 +98,7 @@ objaverse_lvis:
   split: data/meta_data/split/lvis.json
   clip_feat_path: data/meta_data/lvis_cat_name_pt_feat.npy
   num_points: ${num_points}
-  num_workers: ${num_workers}
+  num_workers: 6
   batch_size: 64
   y_up: True
   normalize: True

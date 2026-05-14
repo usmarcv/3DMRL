@@ -2,20 +2,22 @@ import os
 import numpy as np
 import warnings
 import pickle
+import logging
 
 from tqdm import tqdm
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import torch
 from utils.logger import  *
 from utils.data import random_rotate_z, normalize_pc, augment_pc
 import MinkowskiEngine as ME
+
+
 def pc_normalize(pc):
     centroid = np.mean(pc, axis=0)
     pc = pc - centroid
     m = np.max(np.sqrt(np.sum(pc**2, axis=1)))
     pc = pc / m
     return pc
-
 
 
 def farthest_point_sample(point, npoint):
@@ -74,7 +76,7 @@ class ModelNet(Dataset):
         shape_names = ['_'.join(x.split('_')[0:-1]) for x in shape_ids[split]]
         self.datapath = [(shape_names[i], os.path.join(self.root, shape_names[i], shape_ids[split][i]) + '.txt') for i
                          in range(len(shape_ids[split]))]
-        # print_log('The size of %s data is %d' % (split, len(self.datapath)), logger='ModelNet')
+        # logging.info('The size of %s data is %d' % (split, len(self.datapath)), logger='ModelNet')
 
         if self.uniform:
             self.save_path = os.path.join(self.root,
@@ -85,7 +87,7 @@ class ModelNet(Dataset):
 
         if self.process_data:
             if not os.path.exists(self.save_path):
-                # print_log('Processing data %s (only running in the first time)...' % self.save_path, logger='ModelNet')
+                # logging.info('Processing data %s (only running in the first time)...' % self.save_path, logger='ModelNet')
                 self.list_of_points = [None] * len(self.datapath)
                 self.list_of_labels = [None] * len(self.datapath)
 
@@ -106,7 +108,8 @@ class ModelNet(Dataset):
                 with open(self.save_path, 'wb') as f:
                     pickle.dump([self.list_of_points, self.list_of_labels], f)
             else:
-                # print_log('Load processed data from %s...' % self.save_path, logger='ModelNet')
+                # logging.info('Load processed data from %s...' % self.save_path, logger='ModelNet')
+                # logging.info('The size of %s data is %d' % (split, len(self.datapath)))
                 with open(self.save_path, 'rb') as f:
                     self.list_of_points, self.list_of_labels = pickle.load(f)
 
@@ -132,6 +135,7 @@ class ModelNet(Dataset):
             point_set = point_set[:, 0:3]
 
         return point_set, label[0]
+
 
     def __getitem__(self, index):
         points, label = self._get_item(index)
@@ -168,8 +172,6 @@ def minkowski_modelnet40_collate_fn(list_data):
     }
 
 
-
-from torch.utils.data import Dataset, DataLoader
 def make_modelNet(config):
     dataset = ModelNet(config)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset)
@@ -183,5 +185,3 @@ def make_modelNet(config):
         sampler=sampler
     )
     return data_loader
-
-
