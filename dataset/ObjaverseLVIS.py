@@ -11,6 +11,8 @@ from utils.data import random_rotate_z, normalize_pc, augment_pc
 import MinkowskiEngine as ME
 import json
 import logging
+
+
 class ObjaverseLVIS(Dataset):
     def __init__(self, config):
         self.split = json.load(open(config.split, "r"))
@@ -27,7 +29,7 @@ class ObjaverseLVIS(Dataset):
 
     def __getitem__(self, index: int):
         data_path = self.split[index]['data_path']
-        data_path = data_path.replace("/mnt/data", 'OpenShape_data')
+        data_path = data_path.replace("/mnt/data", 'data')
         data = np.load(data_path, allow_pickle=True).item()
         n = data['xyz'].shape[0]
         # if n != self.num_points:

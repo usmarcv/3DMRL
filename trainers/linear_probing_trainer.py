@@ -35,18 +35,36 @@ class Linear_Probing_Trainer(object):
         self.best_modelnet40_overall_acc = 0
         self.best_modelnet40_class_acc = 0
 
-    def load_from_checkpoint(self, path):
+       def load_from_checkpoint(self, path):
         checkpoint = torch.load(path, map_location='cpu')
-        self.model.load_state_dict(checkpoint['state_dict'])
+        
+        self._get_module(self.model).load_state_dict(checkpoint['state_dict'])
+        self._get_module(self.logit_scale).load_state_dict(checkpoint['logit_scale'])
+        
+        # Carrega os cabeçalhos MRL
+        if 'mrl_heads' in checkpoint:
+            self._get_module(self.mrl_heads).load_state_dict(checkpoint['mrl_heads'])
+            
+        # Carrega as projeções (se existirem no checkpoint e no config)
+        if self.config.training.use_text_proj and 'text_proj' in checkpoint:
+            self._get_module(self.text_proj).load_state_dict(checkpoint['text_proj'])
+        if self.config.training.use_image_proj and 'image_proj' in checkpoint:
+            self._get_module(self.image_proj).load_state_dict(checkpoint['image_proj'])
 
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         if self.config.training.scheduler == "default":
             self.scheduler.load_state_dict(checkpoint['scheduler'])
-        self.epoch = checkpoint['epoch']
+            
+        self.epoch = checkpoint['epoch'] + 1
         self.step = checkpoint['step']
 
         logging.info("Loaded checkpoint from {}".format(path))
         logging.info("----Epoch: {0} Step: {1}".format(self.epoch, self.step))
+
+
+    def _get_module(self, module):
+        return module.module if hasattr(module, "module") else module
+
 
     def train_one_epoch(self):
         self.model.eval()
@@ -61,24 +79,8 @@ class Linear_Probing_Trainer(object):
             self.optimizer.zero_grad()
             loss = 0
             with torch.no_grad():
-                # print(data["xyz_dense"].shape)
-                if not self.config.model.get("use_dense", False):
-                    pred_feat = self.model(data['xyz'], data['features'], \
-                                           device=self.config.device, \
-                                           quantization_size=self.config.model.voxel_size)
-                else:
-                    pred_feat = self.model(data['xyz_dense'], data['features_dense'])
-                if self.image_branch is not None and self.text_branch is not None:
-                    pc_image_feat = self.image_branch(pred_feat)
-                    pc_text_feat = self.text_branch(pred_feat)
-                    if self.config.linear_layer.feature_type == "all":
-                        pred_feat = torch.cat((pc_text_feat, pc_image_feat), dim=-1)
-                    elif self.config.linear_layer.feature_type == "image_branch":
-                        pred_feat = pc_image_feat
-                    elif self.config.linear_layer.feature_type == "text_branch":
-                        pred_feat = pc_text_feat
-                    else:
-                        pred_feat = pred_feat
+                # print(data['xyz_dense'].cuda())
+                pred_feat = self.model(data['xyz_dense'])
             output = self.linear_layer(pred_feat)
             label = data["category"].to(self.config.device)
             loss = self.criterion(output, label.long())
@@ -100,24 +102,8 @@ class Linear_Probing_Trainer(object):
         with torch.no_grad():
             for data in tqdm(self.test_loader):
                 with torch.no_grad():
-                    if not self.config.model.get("use_dense", False):
-                        pred_feat = self.model(data['xyz'], data['features'], \
-                                               device=self.config.device, \
-                                               quantization_size=self.config.model.voxel_size)
-                    else:
-                        pred_feat = self.model(data['xyz_dense'], data['features_dense'])
-                    if self.image_branch is not None and self.text_branch is not None:
-                        pc_image_feat = self.image_branch(pred_feat)
-                        pc_text_feat = self.text_branch(pred_feat)
-                        if self.config.linear_layer.feature_type == "all":
-                            pred_feat = torch.cat((pc_text_feat, pc_image_feat), dim=-1)
-                        elif self.config.linear_layer.feature_type == "image_branch":
-                            pred_feat = pc_image_feat
-                        elif self.config.linear_layer.feature_type == "text_branch":
-                            pred_feat = pc_text_feat
-                        else:
-                            pred_feat = pred_feat
-
+                    # print(data['xyz_dense'].cuda())
+                    pred_feat = self.model(data['xyz_dense'])
                     labels = data['category'].to(self.config.device)
                     labels_all.append(labels)
 
@@ -192,4 +178,3 @@ class Linear_Probing_Trainer(object):
                 self.save_model('latest')
             if self.rank == 0 and self.epoch % self.config.training.save_freq == 0:
                 self.save_model('epoch_{}'.format(self.epoch))
-

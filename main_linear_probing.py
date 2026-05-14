@@ -14,10 +14,11 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import data
 import models
 from models.LogitScaleNetwork import LogitScaleNetwork
-from models.clip_adapter import NewCLIP
+
 from trainers.mlp import MLP, MLP_ME
 from trainers.trainer import Trainer
 from trainers.tamm_trainer import TAMM_Trainer
+
 from utils.logger import setup_logging
 from utils.misc import load_config, dump_config
 from utils.scheduler import cosine_lr, const_lr
