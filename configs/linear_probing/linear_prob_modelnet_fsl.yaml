@@ -1,0 +1,80 @@
+project_name: 3DMRL-few-shot
+clip_embed_dim: 1280
+trainer: few-shot
+
+
+fix_seed: True
+seed: 0
+device: cuda
+
+
+batch_size: 8
+num_workers: 8
+num_points: 8192
+
+
+model:
+  name: PointBERT
+  scaling: 4
+  use_dense: True
+  proj: True 
+  in_channel: 6
+  out_channel: ${clip_embed_dim}
+  embedding_channel: 1024
+  voxel_size: 0.02
+
+
+pretrained_model:
+  # path: exp/3DMRL_PointBERT_bs128_lr5e-4_n4_effFalse_split_shapenet_only@20260506-151705/ckpt/epoch_37.pt
+  path: exp/3DMRL_PointBERT_bs128_lr5e-4_n4_split_all@20260420-152050/ckpt/epoch_126.pt
+  # path: ckpts_methods/model.pt
+
+
+mrl:
+  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  out_dim: ${clip_embed_dim}
+  efficient: False 
+
+
+linear_layer:
+  mrl_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  out_dim: 40   # ModelNet40
+
+
+training:
+  lr: 1e-3
+  max_epoch: 300
+  warmup_epoch: 5
+  scheduler: cosine
+  weight_decay: 0.05
+  save_freq: 1
+
+
+dataset:
+  NAME: ModelNetFewShot 
+  DATA_PATH: data/ModelNetFewShot 
+  N_POINTS: 8192
+  USE_NORMALS: False
+  NUM_CATEGORY: 40
+  subset: train   
+  way: 5
+  shot: 10
+  fold: 0      
+  num_workers: 8
+  batch_size: ${batch_size} 
+  seed: 0
+
+
+test_dataset:
+  NAME: ModelNetFewShot 
+  DATA_PATH: data/ModelNetFewShot 
+  N_POINTS: 8192
+  USE_NORMALS: False
+  NUM_CATEGORY: 40
+  subset: test   
+  way: 5
+  shot: 10
+  fold: 0      
+  num_workers: 8
+  batch_size: ${batch_size} 
+  seed: 0 
