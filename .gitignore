@@ -1,9 +1,21 @@
 exp
 data
 tamm_models_ckpt
+ckpts_methods
+configs/linear_probing
+configs/retrieval
+configs/Inferences
 assets
 MinkowskiEngine
 selected_ckpt
+objaverse
+retrieval_*
+*.csv
+*.json
+*.pt
+*.ipynb
+*.sh
+*.h5
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

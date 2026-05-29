@@ -13,7 +13,11 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data import DistributedSampler
 
 
-# import open3d
+# import open3d as o3d
+# o3d.visualization.gui.Application.instance.initialize()
+
+import trimesh
+
 from utils.data import random_rotate_z, normalize_pc, augment_pc
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -711,16 +715,332 @@ def make_open_text_images(config, phase):
     return data_loader
 
 
+# class ScannetTest(Dataset):
+#     def __init__(self, config):
+#         self.split = json.load(open(config.Scannet.split, "r"))
+#         self.num_points = config.Scannet.num_points
+#         self.use_color = config.dataset.use_color
+#         self.y_up = config.Scannet.y_up
+#         clip_feat = np.load(config.Scannet.clip_feat_path)
+#         self.categories = ['sink', 'chair', 'toilet', 'door', 'wall', 'desk', 'shower curtain', 'sofa', 'window',
+#                            'table', 'curtain', 'picture', 'cabinet', 'floor', 'refrigerator', 'bookshelf', 'bed',
+#                            'bathtub', 'counter']
+#         self.clip_cat_feat = []
+#         self.category2idx = {}
+#         for i, category in enumerate(self.categories):
+#             self.category2idx[category] = i
+#         self.clip_cat_feat = clip_feat
+#         logging.info("scannetTest: %d samples" % self.__len__())
+#         logging.info("----clip feature shape: %s" % str(self.clip_cat_feat.shape))
+
+#     def __getitem__(self, index: int):
+#         data_path = self.split[index]['data_path']
+
+#         # data = open3d.io.read_point_cloud(data_path)
+#         # xyz = np.asarray(data.points)
+#         #
+#         #
+#         # label = self.split[index]['category']
+#         #
+#         # n = xyz.shape[0]
+#         # if n < self.num_points:
+#         #     ratio = self.num_points / n
+#         #     ratio = int(ratio) + 1
+#         #
+#         #     xyz = np.repeat(xyz, ratio, axis=0)
+#         #     # print(xyz.shape)
+#         #
+#         # # if n != self.num_points:
+#         # n = xyz.shape[0]
+#         # rgb = np.zeros_like(xyz)
+#         # idx = random.sample(range(n), self.num_points)
+#         # xyz = xyz[idx]
+#         # rgb = rgb[idx]
+#         #
+#         #
+#         #
+#         #
+#         # if self.y_up:
+#         #     # swap y and z axis
+#         #     xyz[:, [1, 2]] = xyz[:, [2, 1]]
+#         #
+#         # xyz = normalize_pc(xyz)
+#         # if self.use_color:
+#         #     features = np.concatenate([xyz, rgb], axis=1)
+#         # else:
+#         #     features = xyz
+#         #
+#         # assert not np.isnan(xyz).any()
+#         # return {
+#         #     "xyz": torch.from_numpy(xyz).type(torch.float32),
+#         #     "features": torch.from_numpy(features).type(torch.float32),
+#         #     "category": self.category2idx[self.split[index]["category"]],
+#         # }
+
+#     def __len__(self):
+#         return len(self.split)
+
+
+# def minkowski_scannet_collate_fn(list_data):
+#     return {
+#         "xyz": ME.utils.batched_coordinates([data["xyz"] for data in list_data], dtype=torch.float32),
+#         "features": torch.cat([data["features"] for data in list_data], dim=0),
+#         "xyz_dense": torch.stack([data["xyz"] for data in list_data]).float(),
+#         "category": torch.tensor([data["category"] for data in list_data], dtype=torch.int32),
+#         "features_dense": torch.stack([data["features"] for data in list_data]),
+#         # "image_feat": torch.stack([data['image_feat'] for data in list_data])
+#     }
+
+
+# def make_scannet(config):
+#     dataset = ScannetTest(config)
+#     sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+#     data_loader = DataLoader(
+#         dataset, \
+#         num_workers=config.scanobjectnn.num_workers, \
+#         collate_fn=minkowski_scannet_collate_fn, \
+#         batch_size=config.scanobjectnn.test_batch_size, \
+#         pin_memory=True, \
+#         shuffle=False, sampler=sampler
+#     )
+#     return data_loader
+
+
+# class ScannetTest(Dataset):
+#     def __init__(self, config):
+#         self.split = json.load(open(config.Scannet.split, "r"))
+#         self.num_points = config.Scannet.num_points
+#         self.use_color = config.dataset.use_color
+#         self.y_up = config.Scannet.y_up
+#         clip_feat = np.load(config.Scannet.clip_feat_path)
+#         self.categories = ['sink', 'chair', 'toilet', 'door', 'wall', 'desk', 'shower curtain', 'sofa', 'window',
+#                            'table', 'curtain', 'picture', 'cabinet', 'floor', 'refrigerator', 'bookshelf', 'bed',
+#                            'bathtub', 'counter']
+#         self.clip_cat_feat = []
+#         self.category2idx = {}
+#         for i, category in enumerate(self.categories):
+#             self.category2idx[category] = i
+#         self.clip_cat_feat = clip_feat
+#         logging.info("scannetTest: %d samples" % self.__len__())
+#         logging.info("----clip feature shape: %s" % str(self.clip_cat_feat.shape))
+
+#     def __getitem__(self, index: int):
+#         data_path = self.split[index]['data_path']
+#         label = self.split[index]['category']
+
+#         # Carrega o arquivo .ply usando Open3D
+#         data = o3d.io.read_point_cloud(data_path)
+#         xyz = np.asarray(data.points)
+        
+#         # MUDANÇA AQUI: Pegando as cores reais extraídas do .ply
+#         rgb = np.asarray(data.colors) 
+
+#         n = xyz.shape[0]
+#         if n < self.num_points:
+#             ratio = self.num_points / n
+#             ratio = int(ratio) + 1
+
+#             xyz = np.repeat(xyz, ratio, axis=0)
+#             rgb = np.repeat(rgb, ratio, axis=0)  # Repete as cores também se duplicar pontos
+
+#         n = xyz.shape[0]
+        
+#         # Faz a amostragem aleatória fixa (ex: 2048 pontos)
+#         idx = random.sample(range(n), self.num_points)
+#         xyz = xyz[idx]
+#         rgb = rgb[idx]
+
+#         if self.y_up:
+#             # Troca os eixos Y e Z se a configuração exigir
+#             xyz[:, [1, 2]] = xyz[:, [2, 1]]
+
+#         # Aplica a função de normalização
+#         xyz = normalize_pc(xyz)
+        
+#         if self.use_color:
+#             features = np.concatenate([xyz, rgb], axis=1)
+#         else:
+#             features = xyz
+
+#         assert not np.isnan(xyz).any()
+#         return {
+#             "xyz": torch.from_numpy(xyz).type(torch.float32),
+#             "features": torch.from_numpy(features).type(torch.float32),
+#             "category": self.category2idx[label],
+#         }
+
+#     def __len__(self):
+#         return len(self.split)
+
+
+# def minkowski_scannet_collate_fn(list_data):
+#     return {
+#         "xyz": ME.utils.batched_coordinates([data["xyz"] for data in list_data], dtype=torch.float32),
+#         "features": torch.cat([data["features"] for data in list_data], dim=0),
+#         "xyz_dense": torch.stack([data["xyz"] for data in list_data]).float(),
+#         "category": torch.tensor([data["category"] for data in list_data], dtype=torch.int32),
+#         "features_dense": torch.stack([data["features"] for data in list_data]),
+#     }
+
+
+# def make_scannet(config):
+#     dataset = ScannetTest(config)
+#     sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+#     data_loader = DataLoader(
+#         dataset,
+#         num_workers=config.scanobjectnn.num_workers,
+#         collate_fn=minkowski_scannet_collate_fn,
+#         batch_size=config.scanobjectnn.test_batch_size,
+#         pin_memory=True,
+#         shuffle=False, 
+#         sampler=sampler
+#     )
+#     return data_loader
+
+# class ScannetTest(Dataset):
+#     def __init__(self, config):
+#         # 1. Carrega o JSON original inteiro
+#         raw_split = json.load(open(config.Scannet.split, "r"))
+        
+#         self.num_points = config.Scannet.num_points
+#         self.use_color = config.dataset.use_color
+#         self.y_up = config.Scannet.y_up
+#         clip_feat = np.load(config.Scannet.clip_feat_path)
+
+#         # 2. Apenas as 17 classes avaliadas no artigo
+#         self.categories = [
+#             'sink', 'chair', 'toilet', 'door', 'desk', 'shower curtain', 'sofa', 'window',
+#             'table', 'curtain', 'picture', 'cabinet', 'refrigerator', 'bookshelf', 'bed',
+#             'bathtub', 'counter'
+#         ]
+        
+#         # 3. FILTRO MÁGICO: Mantém na lista apenas os itens que pertencem às 17 classes
+#         self.split = [item for item in raw_split if item['category'] in self.categories]
+
+#         self.clip_cat_feat = []
+#         self.category2idx = {}
+#         for i, category in enumerate(self.categories):
+#             self.category2idx[category] = i
+            
+#         self.clip_cat_feat = clip_feat
+#         logging.info("scannetTest: %d samples (após filtro de classes)" % self.__len__())
+#         logging.info("----clip feature shape: %s" % str(self.clip_cat_feat.shape))
+
+
+#     def __getitem__(self, index: int):
+#         data_path = self.split[index]['data_path']
+#         label = self.split[index]['category']
+
+#         mesh = trimesh.load(data_path)
+#         xyz = np.array(mesh.vertices)
+        
+#         if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+#             rgb = np.array(mesh.visual.vertex_colors)[:, :3] / 255.0
+#         else:
+#             rgb = np.zeros_like(xyz)
+
+#         n = xyz.shape[0]
+#         if n < self.num_points:
+#             ratio = self.num_points / n
+#             ratio = int(ratio) + 1
+
+#             xyz = np.repeat(xyz, ratio, axis=0)
+#             rgb = np.repeat(rgb, ratio, axis=0) 
+
+#         n = xyz.shape[0]
+        
+#         # AJUSTE: Amostragem rápida via NumPy e amarrada ao index (Garante reprodutibilidade)
+#         g = np.random.RandomState(index)
+#         idx = g.choice(n, self.num_points, replace=False)
+#         xyz = xyz[idx]
+#         rgb = rgb[idx]
+
+#         if self.y_up:
+#             xyz[:, [1, 2]] = xyz[:, [2, 1]]
+
+#         xyz = normalize_pc(xyz)
+        
+#         if self.use_color:
+#             features = np.concatenate([xyz, rgb], axis=1)
+#         else:
+#             features = xyz
+
+#         assert not np.isnan(xyz).any()
+   
+#         return {
+#         "xyz": xyz,              # Tensor ou Array
+#         "features": features,    # Tensor ou Array
+#         "category": label_idx,   # Inteiro
+#         "idx": index             # <--- ADICIONE ESTA LINHA EXATAMENTE ASSIM
+#         }
+
+#     def __len__(self):
+#         return len(self.split)
+
+
+
+
+# # 2. Atualize a sua função de agrupamento:
+# def minkowski_scannet_collate_fn(list_data):
+#     return {
+#         "xyz": ME.utils.batched_coordinates([data["xyz"] for data in list_data], dtype=torch.float32),
+#         "features": torch.cat([data["features"] for data in list_data], dim=0),
+#         "xyz_dense": torch.stack([data["xyz"] for data in list_data]).float(),
+#         "category": torch.tensor([data["category"] for data in list_data], dtype=torch.int32),
+#         "features_dense": torch.stack([data["features"] for data in list_data]),
+#         "idx": torch.tensor([data["idx"] for data in list_data], dtype=torch.long),
+#     }
+
+
+# def minkowski_scannet_collate_fn(list_data):
+#     return {
+#         "xyz": ME.utils.batched_coordinates([data["xyz"] for data in list_data], dtype=torch.float32),
+#         "features": torch.cat([data["features"] for data in list_data], dim=0),
+#         "xyz_dense": torch.stack([data["xyz"] for data in list_data]).float(),
+#         "category": torch.tensor([data["category"] for data in list_data], dtype=torch.int32),
+#         "features_dense": torch.stack([data["features"] for data in list_data]),
+#     }
+
+
+# def make_scannet(config):
+#     dataset = ScannetTest(config)
+#     # AJUSTE: Adicionado shuffle=False explicitamente no DistributedSampler
+#     sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=False)
+#     data_loader = DataLoader(
+#         dataset,
+#         num_workers=config.Scannet.num_workers,       
+#         collate_fn=minkowski_scannet_collate_fn,
+#         batch_size=config.Scannet.test_batch_size,     
+#         pin_memory=True,
+#         shuffle=False, 
+#         sampler=sampler
+#     )
+#     return data_loader
+
+
+
 class ScannetTest(Dataset):
     def __init__(self, config):
         self.split = json.load(open(config.Scannet.split, "r"))
+        # Em vez de carregar tudo direto, filtre o que não está nas suas categorias
+        full_split = json.load(open(config.Scannet.split, "r"))
+        self.categories = ['sink', 'chair', 'toilet', 'door', 'desk', 'shower curtain', 'sofa', 'window',
+                           'table', 'curtain', 'picture', 'cabinet', 'refrigerator', 'bookshelf', 'bed',
+                           'bathtub', 'counter']
+        # Mantém no dataset apenas amostras cujo 'category' esteja na sua lista atual
+        self.split = [item for item in full_split if item['category'] in self.categories]
         self.num_points = config.Scannet.num_points
         self.use_color = config.dataset.use_color
         self.y_up = config.Scannet.y_up
         clip_feat = np.load(config.Scannet.clip_feat_path)
-        self.categories = ['sink', 'chair', 'toilet', 'door', 'wall', 'desk', 'shower curtain', 'sofa', 'window',
-                           'table', 'curtain', 'picture', 'cabinet', 'floor', 'refrigerator', 'bookshelf', 'bed',
-                           'bathtub', 'counter']
+
+        # self.categories = ['sink', 'chair', 'toilet', 'door', 'wall', 'desk', 'shower curtain', 'sofa', 'window',
+        #                    'table', 'curtain', 'picture', 'cabinet', 'floor', 'refrigerator', 'bookshelf', 'bed',
+        #                    'bathtub', 'counter', "otherfurniture"]
+        # self.categories = ['sink', 'chair', 'toilet', 'door', 'desk', 'shower curtain', 'sofa', 'window',
+        #                    'table', 'curtain', 'picture', 'cabinet', 'refrigerator', 'bookshelf', 'bed',
+        #                    'bathtub', 'counter']
+        
         self.clip_cat_feat = []
         self.category2idx = {}
         for i, category in enumerate(self.categories):
@@ -731,47 +1051,48 @@ class ScannetTest(Dataset):
 
     def __getitem__(self, index: int):
         data_path = self.split[index]['data_path']
+        label = self.split[index]['category']
 
-        # data = open3d.io.read_point_cloud(data_path)
-        # xyz = np.asarray(data.points)
-        #
-        #
-        # label = self.split[index]['category']
-        #
-        # n = xyz.shape[0]
-        # if n < self.num_points:
-        #     ratio = self.num_points / n
-        #     ratio = int(ratio) + 1
-        #
-        #     xyz = np.repeat(xyz, ratio, axis=0)
-        #     # print(xyz.shape)
-        #
-        # # if n != self.num_points:
-        # n = xyz.shape[0]
-        # rgb = np.zeros_like(xyz)
-        # idx = random.sample(range(n), self.num_points)
-        # xyz = xyz[idx]
-        # rgb = rgb[idx]
-        #
-        #
-        #
-        #
-        # if self.y_up:
-        #     # swap y and z axis
-        #     xyz[:, [1, 2]] = xyz[:, [2, 1]]
-        #
-        # xyz = normalize_pc(xyz)
-        # if self.use_color:
-        #     features = np.concatenate([xyz, rgb], axis=1)
-        # else:
-        #     features = xyz
-        #
-        # assert not np.isnan(xyz).any()
-        # return {
-        #     "xyz": torch.from_numpy(xyz).type(torch.float32),
-        #     "features": torch.from_numpy(features).type(torch.float32),
-        #     "category": self.category2idx[self.split[index]["category"]],
-        # }
+        mesh = trimesh.load(data_path)
+        xyz = np.array(mesh.vertices)
+        
+        if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+            rgb = np.array(mesh.visual.vertex_colors)[:, :3] / 255.0
+        else:
+            rgb = np.zeros_like(xyz)
+
+        n = xyz.shape[0]
+        if n < self.num_points:
+            ratio = self.num_points / n
+            ratio = int(ratio) + 1
+
+            xyz = np.repeat(xyz, ratio, axis=0)
+            rgb = np.repeat(rgb, ratio, axis=0) 
+
+        n = xyz.shape[0]
+        
+        # AJUSTE: Amostragem rápida via NumPy e amarrada ao index (Garante reprodutibilidade)
+        g = np.random.RandomState(index)
+        idx = g.choice(n, self.num_points, replace=False)
+        xyz = xyz[idx]
+        rgb = rgb[idx]
+
+        if self.y_up:
+            xyz[:, [1, 2]] = xyz[:, [2, 1]]
+
+        xyz = normalize_pc(xyz)
+        
+        if self.use_color:
+            features = np.concatenate([xyz, rgb], axis=1)
+        else:
+            features = xyz
+
+        assert not np.isnan(xyz).any()
+        return {
+            "xyz": torch.from_numpy(xyz).type(torch.float32),
+            "features": torch.from_numpy(features).type(torch.float32),
+            "category": self.category2idx[label],
+        }
 
     def __len__(self):
         return len(self.split)
@@ -784,19 +1105,20 @@ def minkowski_scannet_collate_fn(list_data):
         "xyz_dense": torch.stack([data["xyz"] for data in list_data]).float(),
         "category": torch.tensor([data["category"] for data in list_data], dtype=torch.int32),
         "features_dense": torch.stack([data["features"] for data in list_data]),
-        # "image_feat": torch.stack([data['image_feat'] for data in list_data])
     }
 
 
 def make_scannet(config):
     dataset = ScannetTest(config)
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+    # AJUSTE: Adicionado shuffle=False explicitamente no DistributedSampler
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=False)
     data_loader = DataLoader(
-        dataset, \
-        num_workers=config.scanobjectnn.num_workers, \
-        collate_fn=minkowski_scannet_collate_fn, \
-        batch_size=config.scanobjectnn.test_batch_size, \
-        pin_memory=True, \
-        shuffle=False, sampler=sampler
+        dataset,
+        num_workers=config.Scannet.num_workers,       
+        collate_fn=minkowski_scannet_collate_fn,
+        batch_size=config.Scannet.test_batch_size,     
+        pin_memory=True,
+        shuffle=False, 
+        sampler=sampler
     )
     return data_loader

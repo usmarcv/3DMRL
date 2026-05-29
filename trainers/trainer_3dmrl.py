@@ -41,7 +41,7 @@ class TrainerToMRL(object):
     def __init__(self, rank, config, model, logit_scale, image_proj, text_proj, mrl_heads,
                  optimizer,
                  scheduler, train_loader, \
-                 modelnet40_loader, objaverse_lvis_loader=None, scanobjectnn_loader=None):
+                 modelnet40_loader, objaverse_lvis_loader=None, scanobjectnn_loader=None, scannetnn_loader=None):
         
         self.rank = rank
         self.config = config
@@ -56,6 +56,7 @@ class TrainerToMRL(object):
         self.modelnet40_loader = modelnet40_loader
         self.objaverse_lvis_loader = objaverse_lvis_loader
         self.scanobjectnn_loader = scanobjectnn_loader
+        self.scannet_loader = scannetnn_loader
         self.epoch = 0
         self.step = 0
         self.alpha = 0.5
@@ -382,6 +383,7 @@ class TrainerToMRL(object):
                 self.test_modelnet40()
                 self.test_objaverse_lvis()
                 self.test_scanobjectnn()
+                self.test_scannet()
             # if self.rank == 0:
             # self.save_model('latest')
             if self.rank == 0 and self.epoch % self.config.training.save_freq == 0:
@@ -727,3 +729,288 @@ class TrainerToMRL(object):
             logging.info("-" * len(header))
             logging.info("="*60)
             torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"scanobjectnn_epoch_{self.epoch}.pth"))
+
+    # def test_scannet(self):
+    #     self.model.eval()
+    #     if self.config.training.use_text_proj:
+    #         self.text_proj.eval()
+    #     if self.config.training.use_image_proj:
+    #         self.image_proj.eval()
+    #     self._get_module(self.mrl_heads).eval()
+
+    #     clip_text_feat = torch.from_numpy(self.scannet_loader.dataset.clip_cat_feat).to(self.config.device)
+    #     if self.config.training.use_text_proj:
+    #         clip_text_feat = self.text_proj(clip_text_feat)
+
+    #     heads = self._get_module(self.mrl_heads)
+    #     nesting_list = heads.nesting_list
+
+    #     logits_all = {dim: [] for dim in nesting_list}
+    #     labels_all = []
+
+    #     with torch.no_grad():
+    #         for data in tqdm(self.scannet_loader, desc="Testing ScanNet"):
+                
+    #             # =====================================================================
+    #             # AUTOCAST NO FORWARD
+    #             # =====================================================================
+    #             with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+    #                 if not self.config.model.get("use_dense", False):
+    #                     pred_feat = self.model(
+    #                         data['xyz'], data['features'],
+    #                         device=self.config.device,
+    #                         quantization_size=self.config.model.voxel_size
+    #                     )
+    #                 else:
+    #                     pred_feat = self.model(
+    #                         data['xyz_dense'].to(self.config.device),
+    #                         data['features_dense'].to(self.config.device)
+    #                     )
+
+    #                 shape_emb_full = self._get_shape_embedding(pred_feat)  
+    #             # =====================================================================
+
+    #             # Converte para FP32
+    #             shape_emb_full = shape_emb_full.float()
+
+    #             labels = data['category'].to(self.config.device)
+    #             labels_all.append(labels)
+
+    #             for dim in nesting_list:
+    #                 shape_emb_dim = shape_emb_full[:, :dim]  
+    #                 clip_text_dim = clip_text_feat[:, :dim].float() # Garante FP32
+                    
+    #                 logits = shape_emb_dim @ F.normalize(clip_text_dim, dim=-1).T
+    #                 logits_all[dim].append(logits.detach())
+
+    #     merged_logits = {}
+    #     final_labels = None
+    #     for dim in nesting_list:
+    #         merged_l, merged_labels = merge_results_dist(logits_all[dim], labels_all)
+    #         merged_logits[dim] = merged_l
+    #         if final_labels is None:
+    #             final_labels = merged_labels 
+    #     labels_all = final_labels 
+
+    #     if self.rank == 0:
+    #         if labels_all is None:
+    #             return
+
+    #         dataset_size = len(self.scannet_loader.dataset)
+    #         labels_all = labels_all[:dataset_size]
+    #         results_to_save = {"labels": labels_all, "dims": {}}
+
+    #         logging.info("="*60)
+    #         logging.info("Test ScanNet per Dimension (Zero-Shot)")
+    #         header = f"{'Dim':<6} | {'Overall Acc':<11} | {'Class Acc':<10} | {'Top-1':<7} | {'Top-3':<7} | {'Top-5':<7}"
+    #         logging.info("-" * len(header))
+    #         logging.info(header)
+    #         logging.info("-" * len(header))
+
+    #         # 2. Rastreamento das métricas do ScanNet
+    #         if not hasattr(self, 'best_scannet_acc'):
+    #             self.best_scannet_acc = 0.0
+    #         if not hasattr(self, 'best_scannet_class_acc'):
+    #             self.best_scannet_class_acc = 0.0
+
+    #         # Número de classes do ScanNet (Baseado na sua lista do data.py)
+    #         num_classes = len(self.scannet_loader.dataset.categories)
+
+    #         for dim in nesting_list:
+    #             logits_dim = merged_logits[dim][:dataset_size]
+    #             topk_acc, _ = self.accuracy(logits_dim, labels_all, topk=(1, 3, 5))
+                
+    #             # 3. Alocando tensores para as classes específicas do ScanNet
+    #             per_cat_correct = torch.zeros(num_classes).to(self.config.device)
+    #             per_cat_count   = torch.zeros(num_classes).to(self.config.device)
+
+    #             for i in torch.unique(labels_all):
+    #                 idx = labels_all == i
+    #                 if idx.sum() > 0:
+    #                     per_cat_correct[i] = (logits_dim[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+    #                     per_cat_count[i]   = idx.sum()
+
+    #             valid_cats = per_cat_count > 0 
+    #             overall_acc = (per_cat_correct.sum() / per_cat_count.sum()).item()
+    #             per_cat_acc = (per_cat_correct[valid_cats] / per_cat_count[valid_cats]).mean().item()
+
+    #             # 4. Atualizando os melhores pesos baseados no ScanNet
+    #             if dim == nesting_list[-1]: 
+    #                 is_best = False
+    #                 if overall_acc > self.best_scannet_acc:
+    #                     self.best_scannet_acc = overall_acc
+    #                     is_best = True
+    #                 if per_cat_acc > self.best_scannet_class_acc:
+    #                     self.best_scannet_class_acc = per_cat_acc
+    #                     is_best = True
+                        
+    #                 if is_best:
+    #                     self.save_model('best_scannet')
+
+    #             logging.info(f"{dim:<6} | {overall_acc:<11.4f} | {per_cat_acc:<10.4f} | {topk_acc[0].item():<7.2f} | {topk_acc[1].item():<7.2f} | {topk_acc[2].item():<7.2f}")
+
+    #             results_to_save["dims"][dim] = {
+    #                 "logits": logits_dim, "overall_acc": overall_acc, "class_acc": per_cat_acc
+    #             }
+
+    #         logging.info("-" * len(header))
+    #         logging.info(f"Best (Max Dim) Overall: {self.best_scannet_acc:.4f} | Class: {self.best_scannet_class_acc:.4f}")
+    #         logging.info("="*60)
+            
+    #         # 5. Salvando o arquivo final com nome ajustado
+    #         torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"scannet_epoch_{self.epoch}.pth"))
+
+
+
+    def test_scannet(self):
+        self.model.eval()
+        if self.config.training.use_text_proj:
+            self.text_proj.eval()
+        if self.config.training.use_image_proj:
+            self.image_proj.eval()
+        self._get_module(self.mrl_heads).eval()
+
+        clip_text_feat = torch.from_numpy(self.scannet_loader.dataset.clip_cat_feat).to(self.config.device)
+        if self.config.training.use_text_proj:
+            clip_text_feat = self.text_proj(clip_text_feat)
+
+        heads = self._get_module(self.mrl_heads)
+        nesting_list = heads.nesting_list
+
+        logits_all = {dim: [] for dim in nesting_list}
+        labels_all = []
+
+        with torch.no_grad():
+            for data in tqdm(self.scannet_loader, desc="Testing ScanNet"):
+                with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                    if not self.config.model.get("use_dense", False):
+                        pred_feat = self.model(
+                            data['xyz'], data['features'],
+                            device=self.config.device,
+                            quantization_size=self.config.model.voxel_size
+                        )
+                    else:
+                        pred_feat = self.model(
+                            data['xyz_dense'].to(self.config.device),
+                            data['features_dense'].to(self.config.device)
+                        )
+
+                    shape_emb_full = self._get_shape_embedding(pred_feat)  
+
+                shape_emb_full = shape_emb_full.float()
+                labels = data['category'].to(self.config.device)
+                labels_all.append(labels)
+
+                for dim in nesting_list:
+                    shape_emb_dim = shape_emb_full[:, :dim]  
+                    clip_text_dim = clip_text_feat[:, :dim].float()
+                    
+                    # CERTO: Aplica F.normalize em AMBOS os lados antes da multiplicação
+                    logits = F.normalize(shape_emb_dim, dim=-1) @ F.normalize(clip_text_dim, dim=-1).T
+                    
+                    logits_all[dim].append(logits.detach())
+
+
+        merged_logits = {}
+        final_labels = None
+        for dim in nesting_list:
+            merged_l, merged_labels = merge_results_dist(logits_all[dim], labels_all)
+            merged_logits[dim] = merged_l
+            if final_labels is None:
+                final_labels = merged_labels 
+        labels_all = final_labels 
+
+
+
+        if self.rank == 0:
+            if labels_all is None:
+                return
+
+            dataset_size = len(self.scannet_loader.dataset)
+            labels_all = labels_all[:dataset_size]
+            results_to_save = {"labels": labels_all, "dims": {}}
+
+            # =====================================================================
+            # CONFIGURAÇÃO DOS NOMES E CABEÇALHO IGUAL AO ARTIGO
+            # =====================================================================
+            categories = self.scannet_loader.dataset.categories
+            num_classes = len(categories)
+            
+            # Dicionário para abreviar os nomes exatamente como na imagem
+            # vocab_mapping = {
+            #     'bed': 'Bed', 'cabinet': 'Cab', 'chair': 'Chair', 'sofa': 'Sofa', 'table': 'Tabl',
+            #     'door': 'Door', 'window': 'Wind', 'bookshelf': 'Bksf', 'picture': 'Pic', 'counter': 'Cntr',
+            #     'desk': 'Desk', 'curtain': 'Curt', 'refrigerator': 'Fridg', 'bathtub': 'Bath',
+            #     'shower curtain': 'Showr', 'toilet': 'Toil', 'sink': 'Sink', 'wall': 'Wall',
+            #     'floor': 'Floor', 'otherfurniture': 'Othr'
+            # }
+            vocab_mapping = {
+                'bed': 'Bed', 'cabinet': 'Cab', 'chair': 'Chair', 'sofa': 'Sofa', 'table': 'Tabl',
+                'door': 'Door', 'window': 'Wind', 'bookshelf': 'Bksf', 'picture': 'Pic', 'counter': 'Cntr',
+                'desk': 'Desk', 'curtain': 'Curt', 'refrigerator': 'Fridg', 'bathtub': 'Bath',
+                'shower curtain': 'Showr', 'toilet': 'Toil', 'sink': 'Sink'
+            }
+
+            # self.categories = ['sink', 'chair', 'toilet', 'door', 'desk', 'shower curtain', 'sofa', 'window',
+            #                'table', 'curtain', 'picture', 'cabinet', 'refrigerator', 'bookshelf', 'bed',
+            #                'bathtub', 'counter']
+
+            
+            short_names = [vocab_mapping.get(cat, cat[:4].capitalize()) for cat in categories]
+            
+            logging.info("=" * 140)
+            logging.info("Zero-shot recognition in ScanNet. Avg.: the average Top1 accuracy across all categories.")
+            logging.info("=" * 140)
+            
+            # Monta a string do cabeçalho dinamicamente
+            header_cats = " | ".join([f"{name:<5}" for name in short_names])
+            header = f"{'Method/Dim':<10} | {'Avg.':<5} | {header_cats}"
+            logging.info(header)
+            logging.info("-" * len(header))
+
+            if not hasattr(self, 'best_scannet_class_acc'):
+                self.best_scannet_class_acc = 0.0
+
+            # Loop para imprimir cada dimensão do MRL como uma linha da tabela
+            for dim in nesting_list:
+                logits_dim = merged_logits[dim][:dataset_size]
+                
+                per_cat_correct = torch.zeros(num_classes).to(self.config.device)
+                per_cat_count   = torch.zeros(num_classes).to(self.config.device)
+
+                for i in torch.unique(labels_all):
+                    idx = labels_all == i
+                    if idx.sum() > 0:
+                        per_cat_correct[i] = (logits_dim[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+                        per_cat_count[i]   = idx.sum()
+
+                valid_cats = per_cat_count > 0 
+                # Avg do artigo = Média das acurácias das classes (Macro) transformado em base 100
+                per_cat_acc = (per_cat_correct[valid_cats] / per_cat_count[valid_cats]).mean().item() * 100.0
+
+                # Coleta a acurácia individual de cada classe em base 100
+                class_accs_printed = []
+                for i in range(num_classes):
+                    if per_cat_count[i] > 0:
+                        acc_val = (per_cat_correct[i] / per_cat_count[i]).item() * 100.0
+                        class_accs_printed.append(f"{acc_val:<5.1f}")
+                    else:
+                        class_accs_printed.append(f"{'0.0':<5}")
+                
+                # Monta e printa a linha do método/dimensão atual
+                cat_rows_str = " | ".join(class_accs_printed)
+                row = f"Dim {dim:<5} | {per_cat_acc:<5.1f} | {cat_rows_str}"
+                logging.info(row)
+
+                # Rastreamento de salvamento de checkpoint (usando a dimensão máxima de saída)
+                if dim == nesting_list[-1]: 
+                    if per_cat_acc > self.best_scannet_class_acc:
+                        self.best_scannet_class_acc = per_cat_acc
+                        self.save_model('best_scannet')
+
+                results_to_save["dims"][dim] = {
+                    "logits": logits_dim, "class_acc": per_cat_acc / 100.0
+                }
+
+            logging.info("=" * 140)
+            torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"scannet_epoch_{self.epoch}.pth"))

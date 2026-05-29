@@ -86,10 +86,11 @@ def main(cli_args, extras):
         modelnet40_loader = data.make_modelnet40test(config)
         objaverse_lvis_loader = data.make_objaverse_lvis(config)
         scanobjectnn_loader = data.make_scanobjectnntest(config)
-        # modelnet40_loader = None
+        scannetnn_loader = data.make_scannet(config)
+        # # modelnet40_loader = None
         # objective_lvis_loader = None
         # scanobjectnn_loader = None
-        scannetnn_loader = data.make_scannet(config)
+        # scannetnn_loader = data.make_scannet(config)
 
         if rank == 0 and train_loader is not None:
             logging.info("Train iterations: {}".format(len(train_loader)))
@@ -296,6 +297,7 @@ def main(cli_args, extras):
             trainer.test_modelnet40()
             trainer.test_objaverse_lvis()
             trainer.test_scanobjectnn()
+            trainer.test_scannet()
             
 
     dist.barrier()
