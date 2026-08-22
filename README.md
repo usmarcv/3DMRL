@@ -1,4 +1,4 @@
-# 3D Matryoshka Representation Learning for Multimodal 3D Understanding
+# 3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning
 This repository contains the official implementation of ''3D-MRL'' in our paper.
 
 ## Installation
