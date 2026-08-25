@@ -16,6 +16,9 @@ retrieval_*
 *.ipynb
 *.sh
 *.h5
+*.png
+*.pdf
+*.txt
 <<<<<<< HEAD
 =======
 
