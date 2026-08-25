@@ -40,7 +40,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 mai
 
 ```
 
-The configs can be found in `confis/Pre-Training` folder. You can also change the setting by passing arguments on the `.yaml's` file. You can find the runned models on the `exp` folder.
+The configs can be found in `configs/Pre-Training` folder. You can also change the settings by passing arguments to the `.yaml` files. You can find the trained models in the `exp` folder.
 
 
 ## Inference
