@@ -19,6 +19,10 @@ mrl:
   out_dim: ${clip_embed_dim}
   efficient: False 
 
+# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 main.py --config configs/Pre-Training/mrl_pointbert_ensembled.yaml --trial_name 3dmlr_pointbert_ensembled
+
+# inference
+# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 test.py --config configs/Pre-Training/mrl_pointbert_shapenet.yaml --resume exp/path/to/checkpoint.pth
 
 model:
   name: PointBERT

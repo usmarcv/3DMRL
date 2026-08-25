@@ -7,7 +7,7 @@ trainer: '3dmrl_trainer'
 
 
 fix_seed: True
-seed: 0
+seed: 0 
 
 
 batch_size: 128 #global 4 gpus 200
@@ -16,12 +16,11 @@ num_workers: 10
 
 
 mrl:
-  # nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
-  # nesting_dims: [1280]
-  nesting_dims: [8, 16, 32, 64, 128, 256, 512, 1024, 1280]
+  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
   out_dim: ${clip_embed_dim}
   efficient: False 
 
+# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29502 main.py --config configs/Pre-Training/mrl_pointbert_ensembled.yaml --trial_name 3dmlr_pointbert_shapenet
 
 model:
   name: PointBERT
