@@ -12,6 +12,7 @@ from torch import nn
 from torch.amp import autocast
 from collections import OrderedDict, defaultdict
 from trainers.trainer_utils import merge_results_dist
+from sklearn.decomposition import PCA
 
 
 class GatherLayer(torch.autograd.Function):
@@ -37,7 +38,7 @@ def gather_features(features):
     return features
 
 
-class TrainerToMRL(object):
+class TrainerToMRLPCA(object):
     def __init__(self, rank, config, model, logit_scale, image_proj, text_proj, mrl_heads,
                  optimizer,
                  scheduler, train_loader, \
@@ -347,7 +348,7 @@ class TrainerToMRL(object):
                         img_loss_dims, img_acc_dims = \
                         self.mrl_loss(pred_feat, single_img_feat,
                                     logit_scale=logit_scale,
-                                mask=mask, lambdas=lambdas)
+                                mask=mask, lambdas=lambdas, mode="openshape_truncated")
                             
                             
                         loss += img_contras_loss * self.config.training.lambda_img_contras 
@@ -367,7 +368,7 @@ class TrainerToMRL(object):
                         single_text_feat = single_text_feat.to(self.config.device)
 
                         text_contras_loss, text_contras_acc, txt_loss_dims, txt_acc_dims = self.mrl_loss(pred_feat[idx], single_text_feat,
-                                                    logit_scale=logit_scale, mask=mask, lambdas=lambdas)
+                                                    logit_scale=logit_scale, mask=mask, lambdas=lambdas, mode="openshape_truncated")
                             
                         loss += text_contras_loss * self.config.training.lambda_text_contras
                         text_contras_acc_list.append(text_contras_acc.item())
@@ -1096,3 +1097,460 @@ class TrainerToMRL(object):
 
             logging.info("=" * 140)
             torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"scannet_epoch_{self.epoch}.pth"))
+
+    # =====================================================================
+    # OpenShape/MRL Linear PCA baseline using MRL dimensions
+    # =====================================================================
+    def _cfg_get(self, cfg, key, default=None):
+        """Small helper that works with dict-like configs and EasyDict/OmegaConf-like configs."""
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        if hasattr(cfg, "get"):
+            try:
+                return cfg.get(key, default)
+            except TypeError:
+                pass
+        return getattr(cfg, key, default)
+
+
+    def _get_mrl_dims(self):
+        """
+        Dimensions used by the PCA baseline.
+        Priority:
+          1) actual mrl_heads.nesting_list
+          2) config.mrl.nesting_dims
+          3) config.eval.pca_dims
+          4) default Matryoshka dimensions
+        """
+        dims = None
+
+        try:
+            heads = self._get_module(self.mrl_heads)
+            if hasattr(heads, "nesting_list"):
+                dims = list(heads.nesting_list)
+        except Exception:
+            dims = None
+
+        if dims is None:
+            mrl_cfg = self._cfg_get(self.config, "mrl", None)
+            dims = self._cfg_get(mrl_cfg, "nesting_dims", None)
+
+        if dims is None:
+            eval_cfg = self._cfg_get(self.config, "eval", None)
+            dims = self._cfg_get(eval_cfg, "pca_dims", None)
+
+        if dims is None:
+            dims = [10, 20, 40, 80, 160, 320, 640, 1280]
+
+        return [int(d) for d in dims]
+
+
+    def _forward_pointcloud(self, data):
+        """Forward helper shared by PCA fitting and PCA evaluation."""
+        if not self.config.model.get("use_dense", False):
+            return self.model(
+                data['xyz'],
+                data['features'],
+                device=self.config.device,
+                quantization_size=self.config.model.voxel_size,
+            )
+        return self.model(
+            data['xyz_dense'].to(self.config.device),
+            data['features_dense'].to(self.config.device),
+        )
+
+
+    def _merge_features_dist(self, feat_list):
+        """
+        Merge variable-length feature tensors across DDP ranks.
+        Returns the merged tensor only on rank 0; other ranks return None.
+        """
+        feat_local = torch.cat(feat_list, dim=0).contiguous()
+
+        if (not dist.is_available()) or (not dist.is_initialized()) or self.config.ngpu <= 1:
+            return feat_local
+
+        world_size = dist.get_world_size()
+        device = feat_local.device
+
+        local_n = torch.tensor([feat_local.shape[0]], device=device, dtype=torch.long)
+        sizes_t = [torch.zeros_like(local_n) for _ in range(world_size)]
+        dist.all_gather(sizes_t, local_n)
+
+        sizes = [int(x.item()) for x in sizes_t]
+        max_n = max(sizes)
+        feat_dim = feat_local.shape[1]
+
+        if feat_local.shape[0] < max_n:
+            pad_n = max_n - feat_local.shape[0]
+            feat_pad = torch.zeros(pad_n, feat_dim, device=device, dtype=feat_local.dtype)
+            feat_local = torch.cat([feat_local, feat_pad], dim=0)
+
+        gathered_feats = [torch.zeros_like(feat_local) for _ in range(world_size)]
+        dist.all_gather(gathered_feats, feat_local)
+
+        if self.rank == 0:
+            return torch.cat([gathered_feats[r][:sizes[r]] for r in range(world_size)], dim=0)
+
+        return None
+
+
+    def _merge_features_labels_dist(self, feat_list, label_list):
+        """
+        Merge variable-length feature/label tensors across DDP ranks.
+        Returns merged tensors only on rank 0; other ranks return (None, None).
+        """
+        feat_local = torch.cat(feat_list, dim=0).contiguous()
+        labels_local = torch.cat(label_list, dim=0).contiguous()
+
+        if (not dist.is_available()) or (not dist.is_initialized()) or self.config.ngpu <= 1:
+            return feat_local, labels_local
+
+        world_size = dist.get_world_size()
+        device = feat_local.device
+
+        local_n = torch.tensor([feat_local.shape[0]], device=device, dtype=torch.long)
+        sizes_t = [torch.zeros_like(local_n) for _ in range(world_size)]
+        dist.all_gather(sizes_t, local_n)
+
+        sizes = [int(x.item()) for x in sizes_t]
+        max_n = max(sizes)
+        feat_dim = feat_local.shape[1]
+
+        if feat_local.shape[0] < max_n:
+            pad_n = max_n - feat_local.shape[0]
+            feat_pad = torch.zeros(pad_n, feat_dim, device=device, dtype=feat_local.dtype)
+            label_pad = torch.zeros(pad_n, device=device, dtype=labels_local.dtype)
+            feat_local = torch.cat([feat_local, feat_pad], dim=0)
+            labels_local = torch.cat([labels_local, label_pad], dim=0)
+
+        gathered_feats = [torch.zeros_like(feat_local) for _ in range(world_size)]
+        gathered_labels = [torch.zeros_like(labels_local) for _ in range(world_size)]
+        dist.all_gather(gathered_feats, feat_local)
+        dist.all_gather(gathered_labels, labels_local)
+
+        if self.rank == 0:
+            feat_all = torch.cat([gathered_feats[r][:sizes[r]] for r in range(world_size)], dim=0)
+            labels_all = torch.cat([gathered_labels[r][:sizes[r]] for r in range(world_size)], dim=0)
+            return feat_all, labels_all
+
+        return None, None
+
+
+    def _get_pca_cache_path(self):
+        eval_cfg = self._cfg_get(self.config, "eval", None)
+        cache_path = self._cfg_get(eval_cfg, "pca_cache_path", None)
+        if cache_path is None:
+            cache_path = os.path.join(self.config.ckpt_dir, "mrl_linear_pca_fit.pt")
+        return cache_path
+
+
+    def _load_linear_pca_cache(self, cache_path=None):
+        if cache_path is None:
+            cache_path = self._get_pca_cache_path()
+
+        cache = torch.load(cache_path, map_location="cpu")
+        self.pca_mean = cache["mean"].float()
+        self.pca_components = cache["components"].float()
+
+        if "explained_variance" in cache:
+            self.pca_explained_variance = cache["explained_variance"].float()
+        if "explained_variance_ratio" in cache:
+            self.pca_explained_variance_ratio = cache["explained_variance_ratio"].float()
+        if "cumulative_variance_ratio" in cache:
+            self.pca_cumulative_variance_ratio = cache["cumulative_variance_ratio"].float()
+        elif hasattr(self, "pca_explained_variance_ratio"):
+            self.pca_cumulative_variance_ratio = torch.cumsum(self.pca_explained_variance_ratio, dim=0)
+
+        logging.info(f"Loaded Linear PCA cache from {cache_path}")
+
+
+    def fit_linear_pca_from_train_loader(self):
+        """
+        Fits a linear PCA baseline on the maximum-dimensional MRL shape embeddings.
+
+        This uses the MRL dimensions from mrl_heads.nesting_list/config.mrl.nesting_dims,
+        fits sklearn PCA only on train shape embeddings, and then stores PCA parameters
+        so evaluation can project both shape and text embeddings into the same PCA space.
+        """
+        self.model.eval()
+        self._get_module(self.mrl_heads).eval()
+
+        eval_cfg = self._cfg_get(self.config, "eval", None)
+        seed = int(self._cfg_get(eval_cfg, "pca_seed", 0))
+        max_samples = int(self._cfg_get(eval_cfg, "pca_fit_samples", 20000))
+        pca_solver = self._cfg_get(eval_cfg, "pca_solver", "randomized")
+        pca_whiten = bool(self._cfg_get(eval_cfg, "pca_whiten", False))
+        pca_niter = int(self._cfg_get(eval_cfg, "pca_niter", 2))
+        pca_load_cache = bool(self._cfg_get(eval_cfg, "pca_load_cache", False))
+        normalize_before = bool(self._cfg_get(eval_cfg, "pca_normalize_before", True))
+        cache_path = self._get_pca_cache_path()
+
+        if self.rank == 0 and pca_load_cache and os.path.exists(cache_path):
+            self._load_linear_pca_cache(cache_path)
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            return
+
+        feat_list = []
+
+        with torch.no_grad():
+            for data in tqdm(self.train_loader, desc="Extracting train MRL embeddings for Linear PCA"):
+                with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                    pred_feat = self._forward_pointcloud(data)
+                    shape_emb_full = self._get_shape_embedding(pred_feat)
+
+                shape_emb_full = shape_emb_full.float()
+                if normalize_before:
+                    shape_emb_full = F.normalize(shape_emb_full, dim=-1)
+
+                feat_list.append(shape_emb_full.detach())
+
+        feat_all = self._merge_features_dist(feat_list)
+
+        if self.rank == 0:
+            feat_all = feat_all.float().cpu().numpy()
+
+            if max_samples is not None and max_samples > 0 and feat_all.shape[0] > max_samples:
+                rng = np.random.default_rng(seed)
+                idx = rng.choice(feat_all.shape[0], size=max_samples, replace=False)
+                feat_all = feat_all[idx]
+
+            dims = self._get_mrl_dims()
+            max_dim = min(max(dims), feat_all.shape[0], feat_all.shape[1])
+
+            logging.info(
+                "Fitting sklearn Linear PCA on MRL embeddings: "
+                f"n_components={max_dim}, samples={feat_all.shape[0]}, "
+                f"solver={pca_solver}, whiten={pca_whiten}, normalize_before={normalize_before}"
+            )
+
+            pca_kwargs = dict(
+                n_components=max_dim,
+                svd_solver=pca_solver,
+                whiten=pca_whiten,
+                random_state=seed,
+            )
+            if pca_solver == "randomized":
+                pca_kwargs["iterated_power"] = pca_niter
+
+            pca = PCA(**pca_kwargs)
+            pca.fit(feat_all)
+
+            self.pca_mean = torch.from_numpy(pca.mean_).float()
+            self.pca_components = torch.from_numpy(pca.components_).float()
+            self.pca_explained_variance = torch.from_numpy(pca.explained_variance_).float()
+            self.pca_explained_variance_ratio = torch.from_numpy(pca.explained_variance_ratio_).float()
+            self.pca_cumulative_variance_ratio = torch.cumsum(self.pca_explained_variance_ratio, dim=0)
+
+            torch.save(
+                {
+                    "mean": self.pca_mean,
+                    "components": self.pca_components,
+                    "explained_variance": self.pca_explained_variance,
+                    "explained_variance_ratio": self.pca_explained_variance_ratio,
+                    "cumulative_variance_ratio": self.pca_cumulative_variance_ratio,
+                    "dims": dims,
+                    "fit_samples": feat_all.shape[0],
+                    "solver": pca_solver,
+                    "whiten": pca_whiten,
+                    "normalize_before": normalize_before,
+                },
+                cache_path,
+            )
+
+            logging.info(f"Saved Linear PCA cache to {cache_path}")
+            for dim in dims:
+                var_preserved = self._get_pca_variance_preserved(dim)
+                if var_preserved is not None:
+                    logging.info(
+                        f"MRL Linear PCA | D={dim}: explained_variance_preserved: {var_preserved:.2f}%"
+                    )
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+
+    def _apply_linear_pca(self, feat, dim):
+        """
+        Applies the fitted sklearn Linear PCA using stored mean/components.
+        Equivalent to pca.transform(feat)[:, :dim].
+        """
+        assert hasattr(self, "pca_mean"), "PCA is not fitted. Run fit_linear_pca_from_train_loader() first."
+        assert hasattr(self, "pca_components"), "PCA is not fitted. Run fit_linear_pca_from_train_loader() first."
+
+        feat = feat.float().cpu()
+        mean = self.pca_mean.float().cpu()
+        components = self.pca_components[:dim].float().cpu()
+        return (feat - mean) @ components.T
+
+
+    def _get_pca_variance_preserved(self, dim):
+        """Returns cumulative explained variance preserved up to dim, in percentage."""
+        if not hasattr(self, "pca_cumulative_variance_ratio"):
+            return None
+        if dim > len(self.pca_cumulative_variance_ratio):
+            return None
+        return self.pca_cumulative_variance_ratio[dim - 1].item() * 100.0
+
+
+    def test_zero_shot_linear_pca(self, loader, dataset_name, num_classes, save_prefix):
+        """
+        Zero-shot evaluation using Linear PCA-compressed MRL embeddings.
+        PCA dimensions come from the MRL nesting list.
+        """
+        self.model.eval()
+        if self.config.training.use_text_proj:
+            self.text_proj.eval()
+        if self.config.training.use_image_proj:
+            self.image_proj.eval()
+        self._get_module(self.mrl_heads).eval()
+
+        eval_cfg = self._cfg_get(self.config, "eval", None)
+        normalize_before = bool(self._cfg_get(eval_cfg, "pca_normalize_before", True))
+
+        clip_text_feat = torch.from_numpy(loader.dataset.clip_cat_feat).to(self.config.device)
+        if self.config.training.use_text_proj:
+            clip_text_feat = self.text_proj(clip_text_feat)
+        clip_text_feat = clip_text_feat.float()
+        if normalize_before:
+            clip_text_feat = F.normalize(clip_text_feat, dim=-1)
+
+        feat_list = []
+        labels_list = []
+
+        with torch.no_grad():
+            for data in tqdm(loader, desc=f"Extracting {dataset_name} MRL embeddings for Linear PCA eval"):
+                with torch.autocast(device_type='cuda', dtype=self.dtype, enabled=(self.dtype != torch.float32)):
+                    pred_feat = self._forward_pointcloud(data)
+                    shape_emb_full = self._get_shape_embedding(pred_feat)
+
+                shape_emb_full = shape_emb_full.float()
+                if normalize_before:
+                    shape_emb_full = F.normalize(shape_emb_full, dim=-1)
+
+                labels = data['category'].to(self.config.device)
+                feat_list.append(shape_emb_full.detach())
+                labels_list.append(labels.detach())
+
+        feat_all, labels_all = self._merge_features_labels_dist(feat_list, labels_list)
+
+        if self.rank != 0:
+            return
+
+        if labels_all is None:
+            return
+
+        dataset_size = len(loader.dataset)
+        feat_all = feat_all[:dataset_size].float().cpu()
+        labels_all = labels_all[:dataset_size].long().cpu()
+        clip_text_cpu = clip_text_feat.float().cpu()
+
+        dims = self._get_mrl_dims()
+        results_to_save = {"labels": labels_all, "dims": {}}
+
+        logging.info("=" * 90)
+        logging.info(f"MRL Linear PCA | {dataset_name} | Zero-shot per MRL dimension")
+        header = f"{'Dim':<6} | {'Var.%':<8} | {'Overall Acc':<11} | {'Class Acc':<10} | {'Top-1':<7} | {'Top-3':<7} | {'Top-5':<7}"
+        logging.info("-" * len(header))
+        logging.info(header)
+        logging.info("-" * len(header))
+
+        for dim in dims:
+            if dim > self.pca_components.shape[0]:
+                logging.warning(
+                    f"Skipping D={dim}; fitted PCA has only {self.pca_components.shape[0]} components."
+                )
+                continue
+
+            shape_d = self._apply_linear_pca(feat_all, dim)
+            text_d = self._apply_linear_pca(clip_text_cpu, dim)
+
+            shape_d = F.normalize(shape_d, dim=-1)
+            text_d = F.normalize(text_d, dim=-1)
+            logits = shape_d @ text_d.T
+
+            topk_acc, _ = self.accuracy(logits, labels_all, topk=(1, 3, 5))
+
+            per_cat_correct = torch.zeros(num_classes)
+            per_cat_count = torch.zeros(num_classes)
+
+            for i in torch.unique(labels_all):
+                idx = labels_all == i
+                if idx.sum() > 0:
+                    per_cat_correct[i] = (logits[idx].argmax(dim=1) == labels_all[idx]).float().sum()
+                    per_cat_count[i] = idx.sum()
+
+            valid_cats = per_cat_count > 0
+            overall_acc = (per_cat_correct.sum() / per_cat_count.sum()).item()
+            class_acc = (per_cat_correct[valid_cats] / per_cat_count[valid_cats]).mean().item()
+            var_preserved = self._get_pca_variance_preserved(dim)
+            var_str = f"{var_preserved:.2f}" if var_preserved is not None else "n/a"
+
+            logging.info(
+                f"{dim:<6} | {var_str:<8} | {overall_acc:<11.4f} | {class_acc:<10.4f} | "
+                f"{topk_acc[0].item():<7.2f} | {topk_acc[1].item():<7.2f} | {topk_acc[2].item():<7.2f}"
+            )
+            logging.info(
+                f"MRL Linear PCA | {dataset_name} | D={dim}: "
+                f"explained_variance_preserved: {var_str}% "
+                f"overall_acc: {overall_acc:.4f} class_acc: {class_acc:.4f} "
+                f"top1_acc: {topk_acc[0].item():.4f} top3_acc: {topk_acc[1].item():.4f} "
+                f"top5_acc: {topk_acc[2].item():.4f}"
+            )
+
+            results_to_save["dims"][dim] = {
+                "logits": logits,
+                "overall_acc": overall_acc,
+                "class_acc": class_acc,
+                "top1_acc": topk_acc[0].item(),
+                "top3_acc": topk_acc[1].item(),
+                "top5_acc": topk_acc[2].item(),
+                "explained_variance_preserved": var_preserved,
+            }
+
+        logging.info("-" * len(header))
+        logging.info("=" * 90)
+        torch.save(results_to_save, os.path.join(self.config.ckpt_dir, f"{save_prefix}_linear_pca_epoch_{self.epoch}.pth"))
+
+
+    def test_modelnet40_linear_pca(self):
+        return self.test_zero_shot_linear_pca(
+            loader=self.modelnet40_loader,
+            dataset_name="ModelNet40",
+            num_classes=40,
+            save_prefix="modelnet40",
+        )
+
+
+    def test_objaverse_lvis_linear_pca(self):
+        return self.test_zero_shot_linear_pca(
+            loader=self.objaverse_lvis_loader,
+            dataset_name="ObjaverseLVIS",
+            num_classes=1156,
+            save_prefix="objaverse_lvis",
+        )
+
+
+    def test_scanobjectnn_linear_pca(self):
+        return self.test_zero_shot_linear_pca(
+            loader=self.scanobjectnn_loader,
+            dataset_name="ScanObjectNN",
+            num_classes=15,
+            save_prefix="scanobjectnn",
+        )
+
+
+    def test_scannet_linear_pca(self):
+        if self.scannet_loader is None:
+            logging.warning("ScanNet loader is None; skipping Linear PCA ScanNet evaluation.")
+            return
+        num_classes = len(self.scannet_loader.dataset.categories)
+        return self.test_zero_shot_linear_pca(
+            loader=self.scannet_loader,
+            dataset_name="ScanNet",
+            num_classes=num_classes,
+            save_prefix="scannet",
+        )

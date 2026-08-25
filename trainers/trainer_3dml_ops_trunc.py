@@ -37,7 +37,7 @@ def gather_features(features):
     return features
 
 
-class TrainerToMRL(object):
+class TrainerOpsTrunc(object):
     def __init__(self, rank, config, model, logit_scale, image_proj, text_proj, mrl_heads,
                  optimizer,
                  scheduler, train_loader, \
@@ -83,176 +83,171 @@ class TrainerToMRL(object):
         self.scaler = torch.amp.GradScaler('cuda', enabled=use_scaler)
         
 
-    def load_from_checkpoint(self, path):
-        checkpoint = torch.load(path, map_location='cpu')
-        
-        self._get_module(self.model).load_state_dict(checkpoint['state_dict'])
-        self._get_module(self.logit_scale).load_state_dict(checkpoint['logit_scale'])
-        
-        # Carrega os cabeçalhos MRL
-        if 'mrl_heads' in checkpoint:
-            self._get_module(self.mrl_heads).load_state_dict(checkpoint['mrl_heads'])
-            
-        # Carrega as projeções (se existirem no checkpoint e no config)
-        if self.config.training.use_text_proj and 'text_proj' in checkpoint:
-            self._get_module(self.text_proj).load_state_dict(checkpoint['text_proj'])
-        if self.config.training.use_image_proj and 'image_proj' in checkpoint:
-            self._get_module(self.image_proj).load_state_dict(checkpoint['image_proj'])
+def load_from_checkpoint(self, path, resume=True, load_mrl_heads=False, strict=True):
+    checkpoint = torch.load(path, map_location="cpu")
 
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
-        if self.config.training.scheduler == "default":
-            self.scheduler.load_state_dict(checkpoint['scheduler'])
-            
-        self.epoch = checkpoint['epoch'] + 1
-        self.step = checkpoint['step']
+    # Modelo principal
+    self._load_state_dict_clean(
+        self.model,
+        checkpoint["state_dict"],
+        strict=strict,
+        name="model",
+    )
+
+    # Logit scale
+    if "logit_scale" in checkpoint:
+        self._load_state_dict_clean(
+            self.logit_scale,
+            checkpoint["logit_scale"],
+            strict=strict,
+            name="logit_scale",
+        )
+
+    # Cabeçalhos MRL
+    # Para 3D-MRL: load_mrl_heads=True
+    # Para OpenShape truncated: load_mrl_heads=False
+    if load_mrl_heads and "mrl_heads" in checkpoint:
+        self._load_state_dict_clean(
+            self.mrl_heads,
+            checkpoint["mrl_heads"],
+            strict=strict,
+            name="mrl_heads",
+        )
+
+    # Projeção de texto, se existir
+    if (
+        hasattr(self.config.training, "use_text_proj")
+        and self.config.training.use_text_proj
+        and "text_proj" in checkpoint
+    ):
+        self._load_state_dict_clean(
+            self.text_proj,
+            checkpoint["text_proj"],
+            strict=strict,
+            name="text_proj",
+        )
+
+    # Projeção de imagem, se existir
+    if (
+        hasattr(self.config.training, "use_image_proj")
+        and self.config.training.use_image_proj
+        and "image_proj" in checkpoint
+    ):
+        self._load_state_dict_clean(
+            self.image_proj,
+            checkpoint["image_proj"],
+            strict=strict,
+            name="image_proj",
+        )
+
+    # Só carrega optimizer/scheduler se estiver retomando treino
+    # Para avaliação/truncated baseline, use resume=False
+    if resume:
+        if "optimizer" in checkpoint:
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+
+        if (
+            self.config.training.scheduler == "default"
+            and "scheduler" in checkpoint
+        ):
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+
+        self.epoch = checkpoint.get("epoch", -1) + 1
+        self.step = checkpoint.get("step", 0)
 
         logging.info("Loaded checkpoint from {}".format(path))
         logging.info("----Epoch: {0} Step: {1}".format(self.epoch, self.step))
+    else:
+        self.epoch = 0
+        self.step = 0
+
+        logging.info("Loaded checkpoint for evaluation from {}".format(path))
 
 
     def _get_module(self, module):
         return module.module if hasattr(module, "module") else module
         
 
-    def mrl_loss(self, feat_pc, feat_clip, logit_scale=1, mask=None, lambdas=None):
+    def mrl_loss(
+        self,
+        feat_pc,
+        feat_clip,
+        logit_scale=1,
+        mask=None,
+        lambdas=None,
+        mode="mrl",
+    ):
+        nesting_list = self.config.model.nesting_list
 
-        # Obtém a nova MRL_Projection_Layer
-        heads = self._get_module(self.mrl_heads)
-        nesting_list = heads.nesting_list # Agora usamos o nome padrão
-        
         if lambdas is None:
             lambdas = [1.0] * len(nesting_list)
 
-        # O forward da nova classe já devolve a tupla de embeddings projetados!
-        projected = heads(feat_pc)  
+        if mode == "mrl":
+            heads = self._get_module(self.mrl_heads)
+            projected = heads(feat_pc)
 
-        t = F.normalize(feat_clip, dim=-1) 
+        elif mode == "openshape_truncated":
+            projected = [feat_pc[:, :d] for d in nesting_list]
 
-        total_loss   = torch.tensor(0.0, device=self.config.device)
-        total_acc    = 0.0
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+        total_loss = torch.tensor(0.0, device=self.config.device)
+        total_acc = 0.0
         loss_per_dim = {}
-        acc_per_dim  = {}
+        acc_per_dim = {}
 
         for i, (s, dim) in enumerate(zip(projected, nesting_list)):
-            
-            # Normalizamos o embedding projetado (s) antes da similaridade
+
+            # se for MRL e s já tiver dimensão dim, isso funciona.
+            # se s tiver 1280, corta para garantir comparação correta.
+            s = s[:, :dim]
+            t = feat_clip[:, :dim]
+
             s = F.normalize(s, dim=-1)
+            t = F.normalize(t, dim=-1)
 
             if self.config.ngpu > 1:
-                all_s = torch.cat(torch.distributed.nn.all_gather(s), dim=0)  
-                all_t = torch.cat(torch.distributed.nn.all_gather(t), dim=0)  
-                logits = logit_scale * (all_s @ all_t.T)                      
+                all_s = torch.cat(torch.distributed.nn.all_gather(s), dim=0)
+                all_t = torch.cat(torch.distributed.nn.all_gather(t), dim=0)
 
+                logits = logit_scale * (all_s @ all_t.T)
                 labels = torch.arange(logits.shape[0], device=self.config.device)
-                loss_dim = (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2.0
 
-                B_local     = s.shape[0]
-                local_start = self.rank * B_local
-                local_end   = local_start + B_local
-                local_logits = logits[local_start:local_end]
-                local_labels = torch.arange(local_start, local_end, device=self.config.device)
-                acc_dim = (local_logits.argmax(dim=1) == local_labels).float().mean()
-
-            else:
-                logits   = logit_scale * (s @ t.T)
-                labels   = torch.arange(logits.shape[0], device=self.config.device)
                 loss_dim = (
                     F.cross_entropy(logits, labels) +
                     F.cross_entropy(logits.T, labels)
                 ) / 2.0
-                acc_dim  = (logits.argmax(dim=1) == labels).float().mean()
 
-            total_loss += lambdas[i] * loss_dim  
-            total_acc  += acc_dim
+                B_local = s.shape[0]
+                local_start = self.rank * B_local
+                local_end = local_start + B_local
+
+                local_logits = logits[local_start:local_end]
+                local_labels = torch.arange(local_start, local_end, device=self.config.device)
+
+                acc_dim = (local_logits.argmax(dim=1) == local_labels).float().mean()
+
+            else:
+                logits = logit_scale * (s @ t.T)
+                labels = torch.arange(logits.shape[0], device=self.config.device)
+
+                loss_dim = (
+                    F.cross_entropy(logits, labels) +
+                    F.cross_entropy(logits.T, labels)
+                ) / 2.0
+
+                acc_dim = (logits.argmax(dim=1) == labels).float().mean()
+
+            total_loss += lambdas[i] * loss_dim
+            total_acc += acc_dim
 
             loss_per_dim[dim] = loss_dim.detach().item()
-            acc_per_dim[dim]  = acc_dim.detach().item()
+            acc_per_dim[dim] = acc_dim.detach().item()
 
         total_loss = total_loss / sum(lambdas)
 
         return total_loss, total_acc / len(nesting_list), loss_per_dim, acc_per_dim
-
-
-    # def mrl_loss(
-    #     self,
-    #     feat_pc,
-    #     feat_clip,
-    #     logit_scale=1,
-    #     mask=None,
-    #     lambdas=None,
-    #     mode="mrl",
-    # ):
-    #     nesting_list = self.config.model.nesting_list
-
-    #     if lambdas is None:
-    #         lambdas = [1.0] * len(nesting_list)
-
-    #     if mode == "mrl":
-    #         heads = self._get_module(self.mrl_heads)
-    #         projected = heads(feat_pc)
-
-    #     elif mode == "openshape_truncated":
-    #         projected = [feat_pc[:, :d] for d in nesting_list]
-
-    #     else:
-    #         raise ValueError(f"Unknown mode: {mode}")
-
-    #     total_loss = torch.tensor(0.0, device=self.config.device)
-    #     total_acc = 0.0
-    #     loss_per_dim = {}
-    #     acc_per_dim = {}
-
-    #     for i, (s, dim) in enumerate(zip(projected, nesting_list)):
-
-    #         # se for MRL e s já tiver dimensão dim, isso funciona.
-    #         # se s tiver 1280, corta para garantir comparação correta.
-    #         s = s[:, :dim]
-    #         t = feat_clip[:, :dim]
-
-    #         s = F.normalize(s, dim=-1)
-    #         t = F.normalize(t, dim=-1)
-
-    #         if self.config.ngpu > 1:
-    #             all_s = torch.cat(torch.distributed.nn.all_gather(s), dim=0)
-    #             all_t = torch.cat(torch.distributed.nn.all_gather(t), dim=0)
-
-    #             logits = logit_scale * (all_s @ all_t.T)
-    #             labels = torch.arange(logits.shape[0], device=self.config.device)
-
-    #             loss_dim = (
-    #                 F.cross_entropy(logits, labels) +
-    #                 F.cross_entropy(logits.T, labels)
-    #             ) / 2.0
-
-    #             B_local = s.shape[0]
-    #             local_start = self.rank * B_local
-    #             local_end = local_start + B_local
-
-    #             local_logits = logits[local_start:local_end]
-    #             local_labels = torch.arange(local_start, local_end, device=self.config.device)
-
-    #             acc_dim = (local_logits.argmax(dim=1) == local_labels).float().mean()
-
-    #         else:
-    #             logits = logit_scale * (s @ t.T)
-    #             labels = torch.arange(logits.shape[0], device=self.config.device)
-
-    #             loss_dim = (
-    #                 F.cross_entropy(logits, labels) +
-    #                 F.cross_entropy(logits.T, labels)
-    #             ) / 2.0
-
-    #             acc_dim = (logits.argmax(dim=1) == labels).float().mean()
-
-    #         total_loss += lambdas[i] * loss_dim
-    #         total_acc += acc_dim
-
-    #         loss_per_dim[dim] = loss_dim.detach().item()
-    #         acc_per_dim[dim] = acc_dim.detach().item()
-
-    #     total_loss = total_loss / sum(lambdas)
-
-    #     return total_loss, total_acc / len(nesting_list), loss_per_dim, acc_per_dim
 
 
     def _get_shape_embedding(self, feat_pc, dim=None):
@@ -347,7 +342,7 @@ class TrainerToMRL(object):
                         img_loss_dims, img_acc_dims = \
                         self.mrl_loss(pred_feat, single_img_feat,
                                     logit_scale=logit_scale,
-                                mask=mask, lambdas=lambdas)
+                                mask=mask, lambdas=lambdas, mode="openshape_truncated")
                             
                             
                         loss += img_contras_loss * self.config.training.lambda_img_contras 
@@ -367,7 +362,7 @@ class TrainerToMRL(object):
                         single_text_feat = single_text_feat.to(self.config.device)
 
                         text_contras_loss, text_contras_acc, txt_loss_dims, txt_acc_dims = self.mrl_loss(pred_feat[idx], single_text_feat,
-                                                    logit_scale=logit_scale, mask=mask, lambdas=lambdas)
+                                                    logit_scale=logit_scale, mask=mask, lambdas=lambdas, mode="openshape_truncated")
                             
                         loss += text_contras_loss * self.config.training.lambda_text_contras
                         text_contras_acc_list.append(text_contras_acc.item())
