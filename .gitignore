@@ -1,12 +1,30 @@
 exp
 data
 tamm_models_ckpt
+ckpts_methods
+configs/linear_probing
+configs/retrieval
+configs/Inferences
 assets
 MinkowskiEngine
 selected_ckpt
+objaverse
+retrieval_*
+
+*.csv
+*.json
+*.pt
+*.ipynb
+*.sh
+*.h5
+*.png
+*.pdf
+*.txt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.pyc
+*.pyo
 *.py[codz]
 *$py.class
 
@@ -212,3 +230,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Retrieval pipeline: large generated embedding artifacts, not source
+retrieval/embeddings/
