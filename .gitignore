@@ -19,10 +19,8 @@ retrieval_*
 *.png
 *.pdf
 *.txt
-<<<<<<< HEAD
-=======
-
->>>>>>> dev
+*.pyc
+*.pyo
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
