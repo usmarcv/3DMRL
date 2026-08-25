@@ -27,6 +27,8 @@ from trainers.testado_mrltamm import CLIP_Adapter_Trainer
 # our new era here
 from trainers.MRL import MRL_Projection_Layer
 from trainers.trainer_3dmrl import TrainerToMRL
+from trainers.trainer import TrainerOpenShape
+
 
 from utils.logger import setup_logging
 from utils.misc import load_config, dump_config
@@ -172,6 +174,40 @@ def main(cli_args, extras):
             if config.training.use_text_proj:
                 params_to_optimize += list(text_proj.parameters())
 
+        
+        elif config.trainer == "openshape_truncated":
+            if rank == 0:
+                logging.info("--- Starting OpenShape truncated evaluation baseline... ---")
+
+            # Modelo 3D OpenShape original. Não usamos mrl_heads aqui.
+            model = models.make(config).to(device)
+            if config.model.name.startswith('Mink'):
+                model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
+                if rank == 0: logging.info("Usando MinkowskiSyncBatchNorm no OpenShape")
+            else:
+                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+                if rank == 0: logging.info("Usando SyncBatchNorm no OpenShape")
+
+            model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
+            if rank == 0:
+                total_params = sum(p.numel() for p in model.parameters())
+                logging.info(f"Network: {config.model.name}, Parâmetros: {total_params}")
+
+            # Mantemos as projeções para compatibilidade com o TrainerOpenShape.
+            # Se use_text_proj/use_image_proj=False, elas não serão usadas na avaliação.
+            image_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
+            text_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
+
+            image_proj = DDP(image_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+            text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
+            # Baseline truncado é eval-only, mas criamos o optimizer para preservar a API do Trainer.
+            params_to_optimize = list(model.parameters()) + list(logit_scale.parameters())
+            if config.training.use_image_proj:
+                params_to_optimize += list(image_proj.parameters())
+            if config.training.use_text_proj:
+                params_to_optimize += list(text_proj.parameters())
 
        # ------------------- ESTÁGIO 2: TREINAMENTO 3D DIRETO (MRL) ---------------------
         elif config.trainer == 'mrl_alignment':
@@ -282,6 +318,15 @@ def main(cli_args, extras):
                 objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
             )
 
+              # TrainerOpsTrunc
+        elif config.trainer == "openshape_truncated":
+            trainer = TrainerOpenShape(
+                rank=rank, config=config, model=model, logit_scale=logit_scale, 
+                image_proj=image_proj, text_proj=text_proj, optimizer=optimizer, scheduler=scheduler, train_loader=train_loader,
+                modelnet40_loader=modelnet40_loader, 
+                objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
+            )
+
         elif config.trainer == "mrl_alignment":
             trainer = TAMM_Trainer(
                 rank=rank, config=config, model=model, logit_scale=logit_scale, 
@@ -295,11 +340,15 @@ def main(cli_args, extras):
 
         if config.resume is not None:
             trainer.load_from_checkpoint(config.resume)
+
         elif config.autoresume:
             if os.path.exists(os.path.join(config.ckpt_dir, 'latest.pt')):
                 trainer.load_from_checkpoint(os.path.join(config.ckpt_dir, 'latest.pt'))
 
+
         trainer.train()
+
+
 
     dist.barrier()
     dist.destroy_process_group()

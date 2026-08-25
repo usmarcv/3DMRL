@@ -51,7 +51,7 @@ def parse_args(args):
     )
     parser.add_argument(
         "--ngpu",
-        default=1,
+        default=4,
         type=int,
         help="number of gpu used"
     )

@@ -2,7 +2,8 @@ project_name: 3DMRL
 clip_embed_dim: 1280
 clip_embed_version: OpenCLIP
 
-trainer: '3dmrl_trainer'
+# trainer: 'openshape_pca'
+trainer: 'openshape_truncated'
 
 fix_seed: True
 seed: 0
@@ -15,14 +16,18 @@ num_workers: 10
 
 mrl:
   nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280] #log-based nesting dimensions
-  # [8, 16 40, 80, 160, 320, 640, 1280]
   out_dim: ${clip_embed_dim}
   efficient: False 
 
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 main.py --config configs/Pre-Training/mrl_pointbert_ensembled.yaml --trial_name 3dmlr_pointbert_ensembled
 
-# inference
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 test.py --config configs/Pre-Training/mrl_pointbert_shapenet.yaml --resume exp/path/to/checkpoint.pth
+eval:
+  pca_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  pca_fit_samples: 20000
+  pca_seed: 0
+  pca_solver: randomized
+  pca_whiten: false
+  pca_niter: 2
+
 
 model:
   name: PointBERT
@@ -67,7 +72,7 @@ training:
 
 dataset:
   name: Four
-  num_imgs: 4
+  num_imgs: 1
   num_texts: 1
   train_split: data/meta_data/split/train_all.json
   train_partial: -1

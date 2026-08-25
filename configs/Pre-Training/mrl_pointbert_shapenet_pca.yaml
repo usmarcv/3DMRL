@@ -2,27 +2,39 @@ project_name: 3DMRL
 clip_embed_dim: 1280
 clip_embed_version: OpenCLIP
 
-trainer: '3dmrl_trainer'
+
+# trainer: '3dmrl_trainer'
+# trainer: '3dmrl_pca'
+
 
 fix_seed: True
 seed: 0
 
 
-batch_size: 128 
+batch_size: 128 #global 4 gpus 200
 num_points: 10000
 num_workers: 10
 
 
 mrl:
-  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280] #log-based nesting dimensions
-  # [8, 16 40, 80, 160, 320, 640, 1280]
+  nesting_dims: [10, 20, 40, 80, 160, 320, 640, 1280]
+  # nesting_dims: [1280]
+  # nesting_dims: [8, 16, 32, 64, 128, 256, 512, 1024, 1280]
+  # nesting_dims: [640, 320, 160, 80, 40, 20, 10, 1280]
   out_dim: ${clip_embed_dim}
   efficient: False 
 
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 main.py --config configs/Pre-Training/mrl_pointbert_ensembled.yaml --trial_name 3dmlr_pointbert_ensembled
 
-# inference
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 test.py --config configs/Pre-Training/mrl_pointbert_shapenet.yaml --resume exp/path/to/checkpoint.pth
+#comentar sem o pca
+eval:
+  pca_fit_samples: 20000
+  pca_seed: 0
+  pca_solver: randomized
+  pca_whiten: false
+  pca_niter: 2
+  pca_normalize_before: true
+  pca_load_cache: false
+
 
 model:
   name: PointBERT
@@ -112,16 +124,6 @@ objaverse_lvis:
 
 
 scanobjectnn:
-  data_path: data/meta_data/scanobjectnn/xyz_label.npy
-  num_points: ${num_points}
-  num_workers: 6
-  test_batch_size: 64
-  clip_feat_path: data/meta_data/scanobjectnn/cat_name_pt_feat.npy
-  y_up: True
-
-
-Scannet:
-  split: data/meta_data/scanobjectnn/xyz_label.npy
   data_path: data/meta_data/scanobjectnn/xyz_label.npy
   num_points: ${num_points}
   num_workers: 6

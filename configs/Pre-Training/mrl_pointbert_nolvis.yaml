@@ -19,10 +19,7 @@ mrl:
   out_dim: ${clip_embed_dim}
   efficient: False 
 
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 main.py --config configs/Pre-Training/mrl_pointbert_ensembled.yaml --trial_name 3dmlr_pointbert_ensembled
-
-# inference
-# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 test.py --config configs/Pre-Training/mrl_pointbert_shapenet.yaml --resume exp/path/to/checkpoint.pth
+# CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29502 main.py --config configs/Pre-Training/mrl_pointbert_nolvis.yaml --trial_name 3dmlr_pointbert_nolvis
 
 model:
   name: PointBERT
@@ -69,7 +66,7 @@ dataset:
   name: Four
   num_imgs: 4
   num_texts: 1
-  train_split: data/meta_data/split/train_all.json
+  train_split: data/meta_data/split/train_no_lvis.json
   train_partial: -1
   use_openshape_feature: True
   num_points: ${num_points}

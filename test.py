@@ -22,6 +22,9 @@ from trainers.testado_mrltamm import CLIP_Adapter_Trainer
 # our new era here
 from trainers.MRL import MRL_Projection_Layer
 from trainers.trainer_3dmrl import TrainerToMRL
+from trainers.trainer_3dml_ops_trunc import TrainerOpsTrunc
+from trainers.trainer import TrainerOpenShape
+from trainers.trainer_3dmrl_pca import TrainerToMRLPCA
 
 from utils.logger import setup_logging
 from utils.misc import load_config, dump_config
@@ -120,7 +123,7 @@ def main(cli_args, extras):
                 params_to_optimize += list(text_proj.parameters())
 
 
-        if config.trainer == "3dmrl_trainer":
+        elif config.trainer in ["3dmrl_trainer", "3dmrl_pca"]:
             if rank == 0:
                 logging.info("--- Starting 3DMRL trainer... ---")
 
@@ -159,6 +162,42 @@ def main(cli_args, extras):
                 params_to_optimize += list(image_proj.parameters())
             if config.training.use_text_proj:
                 params_to_optimize += list(text_proj.parameters())
+
+
+        elif config.trainer in ["openshape_truncated", "openshape_pca"]:
+            if rank == 0:
+                logging.info(f"--- Starting {config.trainer} evaluation baseline... ---")
+
+            # Modelo 3D OpenShape original. Não usamos mrl_heads aqui.
+            model = models.make(config).to(device)
+            if config.model.name.startswith('Mink'):
+                model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
+                if rank == 0: logging.info("Usando MinkowskiSyncBatchNorm no OpenShape")
+            else:
+                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+                if rank == 0: logging.info("Usando SyncBatchNorm no OpenShape")
+
+            model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
+            if rank == 0:
+                total_params = sum(p.numel() for p in model.parameters())
+                logging.info(f"Network: {config.model.name}, Parâmetros: {total_params}")
+
+            # Mantemos as projeções para compatibilidade com o TrainerOpenShape.
+            # Se use_text_proj/use_image_proj=False, elas não serão usadas na avaliação.
+            image_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
+            text_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
+
+            image_proj = DDP(image_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+            text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
+
+            # Baseline truncado é eval-only, mas criamos o optimizer para preservar a API do Trainer.
+            params_to_optimize = list(model.parameters()) + list(logit_scale.parameters())
+            if config.training.use_image_proj:
+                params_to_optimize += list(image_proj.parameters())
+            if config.training.use_text_proj:
+                params_to_optimize += list(text_proj.parameters())
+
 
 
        # ------------------- ESTÁGIO 2: TREINAMENTO 3D DIRETO (MRL) ---------------------
@@ -220,7 +259,7 @@ def main(cli_args, extras):
             params_to_optimize = list(model.parameters()) + list(logit_scale.parameters())
             
         else:
-            raise ValueError(f"Trainer '{config.trainer}' não reconhecido. Use 'clip_adapter_trainer' ou 'mrl_alignment'.")
+            raise ValueError(f"Trainer '{config.trainer}' não reconhecido. Use 'clip_adapter_trainer', '3dmrl_trainer', 'openshape_truncated', 'openshape_pca' ou 'mrl_alignment'.")
 
 
         # ==============================================================================
@@ -270,6 +309,25 @@ def main(cli_args, extras):
                 objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
             )
 
+        elif config.trainer == "3dmrl_pca":
+            trainer = TrainerToMRLPCA(
+                rank=rank, config=config, model=model, logit_scale=logit_scale, 
+                image_proj=image_proj, text_proj=text_proj, mrl_heads=mrl_heads,
+                optimizer=optimizer, scheduler=scheduler, train_loader=train_loader,
+                modelnet40_loader=modelnet40_loader, 
+                objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
+            )
+
+
+        # TrainerOpsTrunc
+        elif config.trainer in ["openshape_truncated", "openshape_pca"]:
+            trainer = TrainerOpenShape(
+                rank=rank, config=config, model=model, logit_scale=logit_scale, 
+                image_proj=image_proj, text_proj=text_proj, optimizer=optimizer, scheduler=scheduler, train_loader=train_loader,
+                modelnet40_loader=modelnet40_loader, 
+                objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
+            )
+
         elif config.trainer == "mrl_alignment":
             trainer = TAMM_Trainer(
                 rank=rank, config=config, model=model, logit_scale=logit_scale, 
@@ -288,11 +346,57 @@ def main(cli_args, extras):
         #         trainer.load_from_checkpoint(os.path.join(config.ckpt_dir, 'latest.pt'))
 
         if config.resume is not None:
-            trainer.load_from_checkpoint(config.resume)
-            trainer.test_modelnet40()
-            trainer.test_objaverse_lvis()
-            trainer.test_scanobjectnn()
-            
+
+            if config.trainer in ["openshape_truncated", "openshape_pca"]:
+                # Baselines OpenShape: eval-only.
+                try:
+                    trainer.load_from_checkpoint(config.resume, resume=False, strict=True)
+                except TypeError:
+                    trainer.load_from_checkpoint(config.resume)
+
+                if config.trainer == "openshape_truncated":
+                    trainer.test_modelnet40_truncated()
+                    trainer.test_objaverse_lvis_truncated()
+                    trainer.test_scanobjectnn_truncated()
+
+                elif config.trainer == "openshape_pca":
+                    eval_cfg = config.get("eval", {}) if hasattr(config, "get") else {}
+                    pca_load_cache = eval_cfg.get("pca_load_cache", False) if hasattr(eval_cfg, "get") else False
+
+                    if pca_load_cache:
+                        trainer.load_pca()
+                    else:
+                        trainer.fit_pca_from_train_loader()
+
+                    trainer.test_modelnet40_pca()
+                    trainer.test_objaverse_lvis_pca()
+                    trainer.test_scanobjectnn_pca()
+
+            elif config.trainer == "3dmrl_pca":
+                # PCA sobre embeddings 3D-MRL usando as MRL dims.
+                trainer.load_from_checkpoint(config.resume)
+
+                eval_cfg = config.get("eval", {}) if hasattr(config, "get") else {}
+                pca_load_cache = eval_cfg.get("pca_load_cache", False) if hasattr(eval_cfg, "get") else False
+
+                if pca_load_cache:
+                    trainer.load_linear_pca()
+                else:
+                    trainer.fit_linear_pca_from_train_loader()
+
+                trainer.test_modelnet40_linear_pca()
+                trainer.test_objaverse_lvis_linear_pca()
+                trainer.test_scanobjectnn_linear_pca()
+
+                if getattr(trainer, "scannet_loader", None) is not None:
+                    trainer.test_scannet_linear_pca()
+
+            else:
+                trainer.load_from_checkpoint(config.resume)
+                trainer.test_modelnet40()
+                trainer.test_objaverse_lvis()
+                trainer.test_scanobjectnn()
+
 
     dist.barrier()
     dist.destroy_process_group()
