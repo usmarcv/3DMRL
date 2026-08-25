@@ -173,6 +173,88 @@ class TrainerToMRL(object):
         return total_loss, total_acc / len(nesting_list), loss_per_dim, acc_per_dim
 
 
+    # def mrl_loss(
+    #     self,
+    #     feat_pc,
+    #     feat_clip,
+    #     logit_scale=1,
+    #     mask=None,
+    #     lambdas=None,
+    #     mode="mrl",
+    # ):
+    #     nesting_list = self.config.model.nesting_list
+
+    #     if lambdas is None:
+    #         lambdas = [1.0] * len(nesting_list)
+
+    #     if mode == "mrl":
+    #         heads = self._get_module(self.mrl_heads)
+    #         projected = heads(feat_pc)
+
+    #     elif mode == "openshape_truncated":
+    #         projected = [feat_pc[:, :d] for d in nesting_list]
+
+    #     else:
+    #         raise ValueError(f"Unknown mode: {mode}")
+
+    #     total_loss = torch.tensor(0.0, device=self.config.device)
+    #     total_acc = 0.0
+    #     loss_per_dim = {}
+    #     acc_per_dim = {}
+
+    #     for i, (s, dim) in enumerate(zip(projected, nesting_list)):
+
+    #         # se for MRL e s já tiver dimensão dim, isso funciona.
+    #         # se s tiver 1280, corta para garantir comparação correta.
+    #         s = s[:, :dim]
+    #         t = feat_clip[:, :dim]
+
+    #         s = F.normalize(s, dim=-1)
+    #         t = F.normalize(t, dim=-1)
+
+    #         if self.config.ngpu > 1:
+    #             all_s = torch.cat(torch.distributed.nn.all_gather(s), dim=0)
+    #             all_t = torch.cat(torch.distributed.nn.all_gather(t), dim=0)
+
+    #             logits = logit_scale * (all_s @ all_t.T)
+    #             labels = torch.arange(logits.shape[0], device=self.config.device)
+
+    #             loss_dim = (
+    #                 F.cross_entropy(logits, labels) +
+    #                 F.cross_entropy(logits.T, labels)
+    #             ) / 2.0
+
+    #             B_local = s.shape[0]
+    #             local_start = self.rank * B_local
+    #             local_end = local_start + B_local
+
+    #             local_logits = logits[local_start:local_end]
+    #             local_labels = torch.arange(local_start, local_end, device=self.config.device)
+
+    #             acc_dim = (local_logits.argmax(dim=1) == local_labels).float().mean()
+
+    #         else:
+    #             logits = logit_scale * (s @ t.T)
+    #             labels = torch.arange(logits.shape[0], device=self.config.device)
+
+    #             loss_dim = (
+    #                 F.cross_entropy(logits, labels) +
+    #                 F.cross_entropy(logits.T, labels)
+    #             ) / 2.0
+
+    #             acc_dim = (logits.argmax(dim=1) == labels).float().mean()
+
+    #         total_loss += lambdas[i] * loss_dim
+    #         total_acc += acc_dim
+
+    #         loss_per_dim[dim] = loss_dim.detach().item()
+    #         acc_per_dim[dim] = acc_dim.detach().item()
+
+    #     total_loss = total_loss / sum(lambdas)
+
+    #     return total_loss, total_acc / len(nesting_list), loss_per_dim, acc_per_dim
+
+
     def _get_shape_embedding(self, feat_pc, dim=None):
         """
         Projeção para inferência zero-shot com suporte ao modo eficiente.
