@@ -10,6 +10,7 @@ MinkowskiEngine
 selected_ckpt
 objaverse
 retrieval_*
+
 *.csv
 *.json
 *.pt
@@ -19,10 +20,11 @@ retrieval_*
 *.png
 *.pdf
 *.txt
-*.pyc
-*.pyo
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.pyc
+*.pyo
 *.py[codz]
 *$py.class
 
