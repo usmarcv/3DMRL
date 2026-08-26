@@ -31,7 +31,7 @@ renaming needed afterwards.
 
 Interactive CLIs that search the embeddings built in step 1 — each one
 prompts you for a query (an object ID for 3D-to-3D, a text description for
-text-to-3D) in a loop until you type `exit`.
+text-to-3D, an image path for image-to-3D) in a loop until you type `exit`.
 
 ```bash
 # 3D shape -> 3D shape (Matryoshka cascade or per-dimension search)
@@ -42,12 +42,24 @@ python retrieval/query_text_to_3d.py --config configs/retrieval/retrieval.yaml
 
 # text -> 3D shape (OpenShape baseline embeddings)
 python retrieval/query_text_to_3d_openshape.py --config configs/retrieval/retrieval.yaml
+
+# image -> 3D shape (3DMRL embeddings)
+python retrieval/query_image_to_3d.py --config configs/retrieval/retrieval.yaml
+
+# image -> 3D shape (OpenShape baseline embeddings)
+python retrieval/query_image_to_3d_openshape.py --config configs/retrieval/retrieval.yaml
 ```
 
 `query_3d_to_3d.py` writes two files per run: `<query_name>.txt` (full log
 with scores) and `<query_name>_ids.txt` (bare UID list, one per line) — the
-latter is what step 3 consumes directly. The two text-query scripts only
-print results to the terminal; they don't save anything to disk.
+latter is what step 3 consumes directly. The text-query and image-query
+scripts only print results to the terminal; they don't save anything to
+disk.
+
+The image scripts embed the query with the same OpenCLIP image tower
+(`ViT-bigG-14` / `laion2b_s39b_b160k`) used to build the shape embeddings, so
+they land in the same joint space as the text queries — point either one at
+any local image file (`.jpg`, `.png`, …) when prompted.
 
 ## 3. Download the matched objects
 
