@@ -66,10 +66,13 @@ If you find our code helpful, please cite our paper:
 
 
 ```bib
-@article{lobo2026_3dmrl,
-        author    = {Lobo, Márcus and Matias, Vitor and Farias, Jeová and Ponti, Moacir},
-        title     = {3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning},
-        journal   = {BMVC},
-        year      = {2026},
-        }
+@misc{lobo20263dmrlnestedmultimodal3d,
+      title={3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning}, 
+      author={Márcus Lobo and Vitor Matias and Jeová Farias and Moacir Ponti},
+      year={2026},
+      eprint={2608.29285},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2608.29285}, 
+}
 ```
