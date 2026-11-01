@@ -13,12 +13,12 @@
 
 <div align="center">
 
-🎉 **Accepted at BMVC 2026!** This is official code of "3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning".
 
 [🌐 project page](https://usmarcv.github.io/3DMRL_page/) | [📃 arXiv](https://arxiv.org/pdf/2608.29285) | [🤗 models](https://huggingface.co/marcusvlc/3D-MRL)
 
 </div>
 
+🎉 **Accepted at BMVC 2026!** This is official code of "3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning".
 
 ## Installation
 
