@@ -20,13 +20,17 @@
 
 <div style="display: flex; align-items: center; gap: 30px;">
   <img src="assets/3dmrl_flow.jpg" alt="3D-MRL method overview" width="400"/>
-  <!-- <div> -->
+  <div>
+
    Our 3D-MRL learns nested 3D representations by aligning point clouds with frozen CLIP image and text embeddings across multiple dimensionalities. Contrastive supervision is applied to each nested prefix, enabling a single 3D encoder to produce representations from compact to full dimensionality without retraining. At inference, embeddings can be truncated according to the available computational budget, supporting efficient zero-shot recognition and cross-modal retrieval.
-  <!-- </div> -->
+  
+  </div>
 </div>
 
 
 <div align="center">
+
+<br><br>
 
 🎉 **Accepted at BMVC 2026!** This is official code of "3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning".
 
