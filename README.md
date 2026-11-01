@@ -1,7 +1,7 @@
 
 <div align="center">
 
-# [3D-MRL: Nested Multimodal 3D Representations via Matryoshka Representation Learning](https://usmarcv.github.io/3DMRL_page/)
+# [3D-MRL](https://usmarcv.github.io/3DMRL_page/): Nested Multimodal 3D Representations via Matryoshka Representation Learning
 
 **[Márcus Lobo¹](https://www.linkedin.com/in/marcusvlc/), [Vitor Matias¹](https://vitorpmh.github.io/), [Jeová Farias²](https://jeovafarias.github.io/), and [Moacir Ponti¹](https://sites.google.com/site/moacirponti/)**
 
