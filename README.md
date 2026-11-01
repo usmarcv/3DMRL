@@ -50,7 +50,7 @@ The configs can be found in `configs/Pre-Training` folder. You can also change t
 Run the zero-shot evaluation by the following command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 test.py --config configs/Pre-Training/mrl_pointbert_shapenet.yaml --resume exp/path/to/checkpoint.pth
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29001 test.py --config configs/Pre-Training/mrl_pointbert_ensembled.yaml --resume exp/path/to/checkpoint.pth
 ```
 
 ## Acknowledgement
