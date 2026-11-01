@@ -175,10 +175,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download de objetos do Objaverse filtrados por categorias.")
     
     parser.add_argument(
-        "--caminho_txt", 
-        type=str, 
-        default="retrieval_results/sneakers.txt", 
-        help="Caminho para o arquivo TXT que contém a lista de UIDs."
+        "--caminho_txt",
+        type=str,
+        required=True,
+        help="Caminho para o arquivo TXT que contém a lista de UIDs (ex.: retrieval/results/3d/<query>_ids.txt)."
     )
     
     parser.add_argument(

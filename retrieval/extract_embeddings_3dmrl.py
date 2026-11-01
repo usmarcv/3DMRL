@@ -1,20 +1,27 @@
 import logging
 import json
+import os
+import sys
 import h5py
 import torch
 import numpy as np
 import torch.nn.functional as F
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tqdm import tqdm
 from collections import OrderedDict
 
 import models
 from trainers.MRL import MRL_Projection_Layer
-from data_retrieval import make_objaverse_lvis
+
+# NOTE: make_objaverse_lvis builds a torch.utils.data.distributed.DistributedSampler,
+# so this script still needs a process group initialized before running
+# (e.g. `torchrun --nproc_per_node=1 retrieval/extract_embeddings_3dmrl.py ...`).
+from data import make_objaverse_lvis
 
 from param import parse_args
 from omegaconf import OmegaConf
-import sys
 
 import data
 
@@ -36,7 +43,7 @@ def load_retrieval_model(
     device
 ):
 
-    logging.info("Carregando modelo...")
+    logging.info("Loading model...")
 
     model = models.make(config).to(device)
 
@@ -75,7 +82,7 @@ def load_retrieval_model_openshape(
     device
 ):
 
-    logging.info("Carregando modelo...")
+    logging.info("Loading model...")
 
     model = models.make(config).to(device)
 
@@ -94,7 +101,7 @@ def load_retrieval_model_openshape(
 
 
     model.eval()
- 
+
 
     return model
 
@@ -113,7 +120,7 @@ def extract_embeddings(config):
         config.pretrained_model.path,
         device
     )
-    
+
     # train_loader = data.make(config, 'train', 0, 1)
 
     dataloader = make_objaverse_lvis(config)
@@ -129,7 +136,7 @@ def extract_embeddings(config):
     current_idx = 0
 
     logging.info(
-        "Extraindo embeddings..."
+        "Extracting embeddings..."
     )
 
     with torch.no_grad():
@@ -163,7 +170,7 @@ def extract_embeddings(config):
                     batch["features_dense"]
                 )
 
-            # Lista:
+            # List:
             # [
             #   (B,1280),
             #   (B,1280),
@@ -182,7 +189,7 @@ def extract_embeddings(config):
                     f"Dim {dim} -> {emb.shape}"
                 )
 
-                # SEMPRE 1280
+                # ALWAYS 1280
                 assert (
                     emb.shape[-1]
                     == config.mrl.out_dim
@@ -215,10 +222,15 @@ def extract_embeddings(config):
 
             current_idx += len(batch_ids)
 
-    logging.info("Salvando H5...")
+    logging.info("Saving H5...")
+
+    h5_path = config.embeddings.mrl_h5
+    json_path = config.embeddings.mrl_json
+    os.makedirs(os.path.dirname(os.path.abspath(h5_path)), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(json_path)), exist_ok=True)
 
     with h5py.File(
-        "shape_embeddings.h5",
+        h5_path,
         "w"
     ) as h5f:
 
@@ -240,7 +252,7 @@ def extract_embeddings(config):
             )
 
     with open(
-        "shape_model_to_idx.json",
+        json_path,
         "w"
     ) as f:
 
@@ -250,7 +262,7 @@ def extract_embeddings(config):
         )
 
     logging.info(
-        "Extração finalizada!"
+        "Extraction finished!"
     )
 
 
@@ -270,4 +282,3 @@ if __name__ == "__main__":
     )
 
     extract_embeddings(config)
-

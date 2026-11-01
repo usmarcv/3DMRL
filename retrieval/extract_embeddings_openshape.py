@@ -1,19 +1,26 @@
 import logging
 import json
+import os
+import sys
 import h5py
 import torch
 import numpy as np
 import torch.nn.functional as F
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from tqdm import tqdm
 from collections import OrderedDict
 
 import models
-from data_retrieval import make_objaverse_lvis
+
+# NOTE: make_objaverse_lvis builds a torch.utils.data.distributed.DistributedSampler,
+# so this script still needs a process group initialized before running
+# (e.g. `torchrun --nproc_per_node=1 retrieval/extract_embeddings_openshape.py ...`).
+from data import make_objaverse_lvis
 
 from param import parse_args
 from omegaconf import OmegaConf
-import sys
 
 import data
 
@@ -27,7 +34,7 @@ def clean_ddp_state_dict(state_dict):
 
 
 def load_retrieval_model_openshape(config, checkpoint_path, device):
-    logging.info("Carregando modelo...")
+    logging.info("Loading model...")
 
     model = models.make(config).to(device)
 
@@ -43,19 +50,19 @@ def load_retrieval_model_openshape(config, checkpoint_path, device):
 def extract_embeddings(config):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Usando a função que carrega apenas o backbone, sem as cabeças MRL
+    # Uses the function that loads only the backbone, without the MRL heads
     model = load_retrieval_model_openshape(
         config, config.pretrained_model.path, device
     )
 
     dataloader = make_objaverse_lvis(config)
 
-    # Lista única para armazenar todos os embeddings da dimensão padrão
+    # Single list to hold all embeddings of the fixed dimension
     all_embeddings = []
     shape_model_to_idx = {}
     current_idx = 0
 
-    logging.info("Extraindo embeddings...")
+    logging.info("Extracting embeddings...")
 
     with torch.no_grad():
         for batch in tqdm(dataloader):
@@ -65,7 +72,7 @@ def extract_embeddings(config):
                 if isinstance(v, torch.Tensor):
                     batch[k] = v.to(device)
 
-            # Extração das features pelo Backbone
+            # Feature extraction via the backbone
             if not config.model.get("use_dense", False):
                 pred_feat = model(
                     batch["xyz"],
@@ -76,33 +83,38 @@ def extract_embeddings(config):
             else:
                 pred_feat = model(batch["xyz_dense"], batch["features_dense"])
 
-            # Normalização L2 diretamente no embedding de saída
+            # L2 normalization directly on the output embedding
             pred_feat = F.normalize(pred_feat, dim=1)
 
             emb_np = pred_feat.cpu().numpy().astype(np.float32)
             all_embeddings.append(emb_np)
 
-            # Mapeamento dos IDs
+            # ID mapping
             for i, model_id in enumerate(batch_ids):
                 shape_model_to_idx[model_id] = current_idx + i
 
             current_idx += len(batch_ids)
 
-    logging.info("Salvando H5...")
+    logging.info("Saving H5...")
 
-    with h5py.File("shape_embeddings_openshape.h5", "w") as h5f:
-        # Concatena a lista em uma única matriz (N, dim_embedding)
+    h5_path = config.embeddings.openshape_h5
+    json_path = config.embeddings.openshape_json
+    os.makedirs(os.path.dirname(os.path.abspath(h5_path)), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(json_path)), exist_ok=True)
+
+    with h5py.File(h5_path, "w") as h5f:
+        # Concatenates the list into a single (N, embedding_dim) matrix
         matrix = np.concatenate(all_embeddings, axis=0)
 
         print(f"shape_feat: {matrix.shape}")
 
-        # Salva em um único dataset fixo, sem o sufixo de dimensão do MRL
+        # Saves to a single fixed dataset, without the MRL dimension suffix
         h5f.create_dataset("shape_feat", data=matrix)
 
-    with open("shape_model_to_idx_openshape.json", "w") as f:
+    with open(json_path, "w") as f:
         json.dump(shape_model_to_idx, f)
 
-    logging.info("Extração finalizada!")
+    logging.info("Extraction finished!")
 
 
 if __name__ == "__main__":

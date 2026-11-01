@@ -1,13 +1,16 @@
 import sys
-import json
-import h5py
-import faiss
-import logging
 import os
+import logging
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import h5py
 
 from param import parse_args
 from omegaconf import OmegaConf
+
+from retrieval.faiss_utils import build_index, load_id_mapping
 
 
 def setup_faiss_databases(h5_path, json_path, nesting_dims):
@@ -19,27 +22,20 @@ def setup_faiss_databases(h5_path, json_path, nesting_dims):
     with h5py.File(h5_path, "r") as h5f:
         for dim in nesting_dims:
             dataset_name = f"shape_feat_{dim}"
-            
+
             if dataset_name not in h5f:
                 logging.warning(f"Dataset {dataset_name} not found in H5 file. Skipping.")
                 continue
-                
+
             shape_embeddings = h5f[dataset_name][:, :dim]
             print(f"-> {dataset_name} successfully sliced to shape: {shape_embeddings.shape}")
 
-            shape_embeddings = np.ascontiguousarray(shape_embeddings.astype(np.float32))
-            faiss.normalize_L2(shape_embeddings)
+            index, shape_embeddings = build_index(shape_embeddings)
             database_embeddings[dim] = shape_embeddings
-
-            index = faiss.IndexFlatIP(dim) # 512
-            index.add(shape_embeddings)
             indices_faiss[dim] = index
             logging.info(f"   FAISS index created for Dim {dim}. Total items: {index.ntotal}")
 
-    with open(json_path, "r") as f:
-        shape_model_to_idx = json.load(f)
-
-    idx_to_shape_id = {v: k for k, v in shape_model_to_idx.items()}
+    shape_model_to_idx, idx_to_shape_id = load_id_mapping(json_path)
 
     return indices_faiss, database_embeddings, idx_to_shape_id, shape_model_to_idx
 
@@ -52,8 +48,8 @@ def run_interactive_3d_retrieval(config, output_filename):
     ids_only_filename = f"{base}_ids{ext}"
 
     indices_faiss, database_embeddings, idx_to_shape_id, shape_model_to_idx = setup_faiss_databases(
-        h5_path="mrl_shape_embeddings.h5",
-        json_path="mrl_shape_model_to_idx.json",
+        h5_path=config.embeddings.mrl_h5,
+        json_path=config.embeddings.mrl_json,
         nesting_dims=nesting_dims
     )
 
@@ -66,7 +62,7 @@ def run_interactive_3d_retrieval(config, output_filename):
     while True:
         sample_ids = list(shape_model_to_idx.keys())[:3]
         print(f"\nSample of valid IDs in your database: {sample_ids}")
-        
+
         shape_id_query = input("Enter the 3D object ID for query (or 'exit'): ").strip()
 
         if shape_id_query.lower() in ["exit", "quit", "sair"]:
@@ -77,7 +73,7 @@ def run_interactive_3d_retrieval(config, output_filename):
             continue
 
         query_idx = shape_model_to_idx[shape_id_query]
-        
+
         print("\nChoose search strategy:")
         print("[1] Run Matryoshka Cascade Search (Fast low-dim filter -> High-dim re-rank)")
         print("[2] Compare accuracy of each dimension isolated")
@@ -88,12 +84,12 @@ def run_interactive_3d_retrieval(config, output_filename):
         # Open both files: one for full logs, one exclusively for IDs
         with open(output_filename, "a", encoding="utf-8") as f_log, \
              open(ids_only_filename, "a", encoding="utf-8") as f_ids:
-            
+
             if option == "1":
                 dim_coarse = nesting_dims[0]
                 dim_fine = nesting_dims[-1]
-                top_n_candidates = 50          
-                
+                top_n_candidates = 50
+
                 header_cascade = (
                     f"\n========================================\n"
                     f"QUERY: {shape_id_query} | STRATEGY: Matryoshka Cascade\n"
@@ -111,29 +107,29 @@ def run_interactive_3d_retrieval(config, output_filename):
 
                 query_fine = database_embeddings[dim_fine][query_idx]
                 candidates_fine_vectors = database_embeddings[dim_fine][candidate_idxs]
-                
+
                 scores = np.dot(candidates_fine_vectors, query_fine)
                 sorted_indices = np.argsort(scores)[::-1]
-                
+
                 rank_count = 0
                 for idx in sorted_indices:
                     best_faiss_idx = candidate_idxs[idx]
                     shape_id = idx_to_shape_id[best_faiss_idx]
                     score = scores[idx]
-                    
+
                     if shape_id == shape_id_query:
                         continue
-                    
+
                     rank_count += 1
                     result_line = f"[{rank_count}] Score: {score:.4f} | ID: {shape_id}\n"
                     print(result_line, end="")
-                    
+
                     # 1. Writes standard formatted log
                     f_log.write(result_line)
                     # 2. Writes ONLY the raw ID string into the second file
                     f_ids.write(f"{shape_id}\n")
-                    
-                    if rank_count == K: 
+
+                    if rank_count == K:
                         break
 
             elif option == "2":
@@ -161,17 +157,17 @@ def run_interactive_3d_retrieval(config, output_filename):
 
                         if shape_id == shape_id_query:
                             continue
-                        
+
                         rank_count += 1
                         result_line = f"[{rank_count}] Score: {score:.4f} | ID: {shape_id}\n"
                         print(result_line, end="")
-                        
+
                         # 1. Writes standard formatted log
                         f_log.write(result_line)
                         # 2. Writes ONLY the raw ID string into the second file
                         f_ids.write(f"{shape_id}\n")
-                        
-                        if rank_count == K: 
+
+                        if rank_count == K:
                             break
             else:
                 print("Invalid option. Please try again.")
@@ -180,11 +176,15 @@ def run_interactive_3d_retrieval(config, output_filename):
 if __name__ == "__main__":
     cli_args, extras = parse_args(sys.argv[1:])
     config = OmegaConf.load(cli_args.config)
-    
-    output_file = "retrieval_results.txt"
+
+    default_output = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "results", "3d", "retrieval_results.txt"
+    )
+    output_file = default_output
     for i, arg in enumerate(sys.argv):
         if arg in ["--output", "-o"] and i + 1 < len(sys.argv):
             output_file = sys.argv[i + 1]
             break
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
     run_interactive_3d_retrieval(config, output_filename=output_file)
