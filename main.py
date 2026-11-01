@@ -14,20 +14,12 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import data
 import models
 from models.LogitScaleNetwork import LogitScaleNetwork
-from models.clip_adapter import NewCLIP
-from trainers_legacy.mlp import MLP, MLP_ME
 
-# Nossos Trainers
-from trainers_legacy.testado_mrltamm import CLIP_Adapter_Trainer
-# from trainers_legacy.mrltamm2 import TAMM_Trainer
-
-# from trainers_legacy.mrl_trainer_adapters import MRLProjectionHeads
 
 
 # our new era here
 from trainers.MRL import MRL_Projection_Layer
 from trainers.trainer_3dmrl import TrainerToMRL
-from trainers_legacy.trainer import TrainerOpenShape
 
 
 from utils.logger import setup_logging
@@ -110,29 +102,6 @@ def main(cli_args, extras):
         # 2. INSTANCIAÇÃO DOS MODELOS (BASEADO NO ESTÁGIO)
         # ==============================================================================
         
-        # ------------------- ESTÁGIO 1: ADAPTADORES 2D/TEXTO --------------------------
-        if config.trainer == "clip_adapter_trainer":
-            if rank == 0:
-                logging.info("--- Iniciando Estágio 1: Treinamento MRL dos Adaptadores ---")
-            
-            image_adapter = NewCLIP(c_in=config.model.c_in, ratio=config.model.ratio).to(device)
-            text_adapter = NewCLIP(c_in=config.model.c_in, ratio=config.model.ratio).to(device)
-            
-            image_proj = torch.nn.Linear(config.model.c_in, config.model.c_in).to(device)
-            text_proj = torch.nn.Linear(config.model.c_in, config.model.c_in).to(device) 
-            
-            image_adapter = DDP(image_adapter, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-            text_adapter = DDP(text_adapter, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-            image_proj = DDP(image_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-            text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-
-            params_to_optimize = list(image_adapter.parameters()) + list(text_adapter.parameters()) + list(logit_scale.parameters())
-
-            if config.training.use_image_proj:
-                params_to_optimize += list(image_proj.parameters())
-            if config.training.use_text_proj:
-                params_to_optimize += list(text_proj.parameters())
-
 
         if config.trainer == "3dmrl_trainer":
             if rank == 0:
@@ -174,101 +143,8 @@ def main(cli_args, extras):
             if config.training.use_text_proj:
                 params_to_optimize += list(text_proj.parameters())
 
-        
-        elif config.trainer == "openshape_truncated":
-            if rank == 0:
-                logging.info("--- Starting OpenShape truncated evaluation baseline... ---")
-
-            # Modelo 3D OpenShape original. Não usamos mrl_heads aqui.
-            model = models.make(config).to(device)
-            if config.model.name.startswith('Mink'):
-                model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
-                if rank == 0: logging.info("Usando MinkowskiSyncBatchNorm no OpenShape")
-            else:
-                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-                if rank == 0: logging.info("Usando SyncBatchNorm no OpenShape")
-
-            model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-
-            if rank == 0:
-                total_params = sum(p.numel() for p in model.parameters())
-                logging.info(f"Network: {config.model.name}, Parâmetros: {total_params}")
-
-            # Mantemos as projeções para compatibilidade com o TrainerOpenShape.
-            # Se use_text_proj/use_image_proj=False, elas não serão usadas na avaliação.
-            image_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
-            text_proj = torch.nn.Linear(config.model.out_channel, config.model.out_channel).to(device)
-
-            image_proj = DDP(image_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-            text_proj = DDP(text_proj, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-
-            # Baseline truncado é eval-only, mas criamos o optimizer para preservar a API do Trainer.
-            params_to_optimize = list(model.parameters()) + list(logit_scale.parameters())
-            if config.training.use_image_proj:
-                params_to_optimize += list(image_proj.parameters())
-            if config.training.use_text_proj:
-                params_to_optimize += list(text_proj.parameters())
-
-       # ------------------- ESTÁGIO 2: TREINAMENTO 3D DIRETO (MRL) ---------------------
-        elif config.trainer == 'mrl_alignment':
-            if rank == 0:
-                logging.info("--- Iniciando Estágio 2: Treinamento 3D Direto com MRL ---")
-
-            # Modelo 3D Principal (PointBERT - O Único Treinável)
-            model = models.make(config).to(device)    
-            if config.model.name.startswith('Mink'):
-                model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
-                if rank == 0: logging.info("Usando MinkowskiSyncBatchNorm no PointBERT")
-            else:
-                model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-                if rank == 0: logging.info("Usando SyncBatchNorm no PointBERT")
-
-            model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-            
-            if rank == 0:
-                total_params = sum(p.numel() for p in model.parameters())
-                logging.info(f"Network: {config.model.name}, Parâmetros de Treino: {total_params}")
-
-            # Professores do Estágio 1 (Congelados)
-            if config.get('use_pretrained', False):
-                if rank == 0: 
-                    logging.info(f"Carregando professores MRL de: {config.pretrained_adapters.path}")
-                
-                pretrained_image_adapter = NewCLIP(c_in=config.pretrained_adapters.c_in, ratio=config.pretrained_adapters.ratio).to(device)
-                pretrained_text_adapter  = NewCLIP(c_in=config.pretrained_adapters.c_in, ratio=config.pretrained_adapters.ratio).to(device)
-
-                checkpoint = torch.load(config.pretrained_adapters.path, map_location='cpu')
-
-                img_state_dict = checkpoint.get('image_adapter', checkpoint.get('state_dict'))
-                txt_state_dict = checkpoint.get('text_adapter', checkpoint.get('state_dict'))
-
-                # 2. O TRUQUE: Remove o prefixo 'module.' de todas as chaves
-                img_state_dict = {k.replace('module.', ''): v for k, v in img_state_dict.items()}
-                txt_state_dict = {k.replace('module.', ''): v for k, v in txt_state_dict.items()}
-
-                # 3. Agora sim, carrega os pesos limpinhos nos professores
-                pretrained_image_adapter.load_state_dict(img_state_dict)
-                pretrained_text_adapter.load_state_dict(txt_state_dict)
-
-                # pretrained_image_adapter.eval()
-                # pretrained_text_adapter.eval()
-                # for param in pretrained_image_adapter.parameters():
-                #     param.requires_grad = False
-                # for param in pretrained_text_adapter.parameters():
-                #     param.requires_grad = False
-
-                pretrained_image_adapter = DDP(pretrained_image_adapter, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-                pretrained_text_adapter  = DDP(pretrained_text_adapter, device_ids=[rank], output_device=rank, find_unused_parameters=False)
-            else:
-                pretrained_image_adapter = None
-                pretrained_text_adapter  = None
-                if rank == 0: logging.warning("Aviso: Treinando SEM os professores MRL.")
-
-            # Parâmetros de Treino para o Estágio 2
-            params_to_optimize = list(model.parameters()) + list(logit_scale.parameters())
-            
         else:
-            raise ValueError(f"Trainer '{config.trainer}' não reconhecido. Use 'clip_adapter_trainer' ou 'mrl_alignment'.")
+            raise ValueError(f"Trainer '{config.trainer}' não reconhecido. Use '3dmrl_trainer'.")
 
 
         # ==============================================================================
@@ -301,15 +177,7 @@ def main(cli_args, extras):
         # 4. INSTANCIAÇÃO DO TRAINER E EXECUÇÃO
         # ==============================================================================
         
-        if config.trainer == "clip_adapter_trainer":
-            trainer = CLIP_Adapter_Trainer(
-                rank=rank, config=config,
-                image_adapter=image_adapter, text_adapter=text_adapter,
-                logit_scale=logit_scale, image_proj=image_proj, text_proj=text_proj,
-                optimizer=optimizer, scheduler=scheduler, train_loader=train_loader
-            )
-            
-        elif config.trainer == "3dmrl_trainer":
+        if config.trainer == "3dmrl_trainer":
             trainer = TrainerToMRL(
                 rank=rank, config=config, model=model, logit_scale=logit_scale, 
                 image_proj=image_proj, text_proj=text_proj, mrl_heads=mrl_heads,
@@ -317,26 +185,6 @@ def main(cli_args, extras):
                 modelnet40_loader=modelnet40_loader, 
                 objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
             )
-
-              # TrainerOpsTrunc
-        elif config.trainer == "openshape_truncated":
-            trainer = TrainerOpenShape(
-                rank=rank, config=config, model=model, logit_scale=logit_scale, 
-                image_proj=image_proj, text_proj=text_proj, optimizer=optimizer, scheduler=scheduler, train_loader=train_loader,
-                modelnet40_loader=modelnet40_loader, 
-                objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
-            )
-
-        elif config.trainer == "mrl_alignment":
-            trainer = TAMM_Trainer(
-                rank=rank, config=config, model=model, logit_scale=logit_scale, 
-                pretrained_image_adapter=pretrained_image_adapter, 
-                pretrained_text_adapter=pretrained_text_adapter,  
-                optimizer=optimizer, scheduler=scheduler, 
-                train_loader=train_loader, modelnet40_loader=modelnet40_loader, 
-                objaverse_lvis_loader=objaverse_lvis_loader, scanobjectnn_loader=scanobjectnn_loader
-            )
-
 
         if config.resume is not None:
             trainer.load_from_checkpoint(config.resume)
