@@ -15,19 +15,19 @@ import data
 import models
 from models.LogitScaleNetwork import LogitScaleNetwork
 from models.clip_adapter import NewCLIP
-from trainers.mlp import MLP, MLP_ME
+from trainers_legacy.mlp import MLP, MLP_ME
 
 # Nossos Trainers
-from trainers.testado_mrltamm import CLIP_Adapter_Trainer
-# from trainers.mrltamm2 import TAMM_Trainer
+from trainers_legacy.testado_mrltamm import CLIP_Adapter_Trainer
+# from trainers_legacy.mrltamm2 import TAMM_Trainer
 
-# from trainers.mrl_trainer_adapters import MRLProjectionHeads
+# from trainers_legacy.mrl_trainer_adapters import MRLProjectionHeads
 
 
 # our new era here
 from trainers.MRL import MRL_Projection_Layer
 from trainers.trainer_3dmrl import TrainerToMRL
-from trainers.trainer import TrainerOpenShape
+from trainers_legacy.trainer import TrainerOpenShape
 
 
 from utils.logger import setup_logging
