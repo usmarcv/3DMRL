@@ -4,7 +4,7 @@ Three stages, run in order. All commands run from the repo root, using the
 `mrlclip` conda env:
 
 ```bash
-conda activate mrlclip
+conda activate 3dmrl
 ```
 
 ## 1. Extract shape embeddings
