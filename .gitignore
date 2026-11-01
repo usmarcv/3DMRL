@@ -5,7 +5,6 @@ ckpts_methods
 configs/linear_probing
 configs/retrieval
 configs/Inferences
-assets
 MinkowskiEngine
 selected_ckpt
 objaverse
